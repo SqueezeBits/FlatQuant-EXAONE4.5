@@ -101,6 +101,22 @@ def _metric_summary(results):
     return rows
 
 
+def _resolve_lm_eval_task_aliases(tasks):
+    aliases = {
+        "mmlu-pro": "mmlu_pro",
+        "mmlu-pro-plus": "mmlu_pro_plus",
+    }
+    resolved = [aliases.get(task, task) for task in tasks]
+    remapped = [
+        f"{task}->{resolved_task}"
+        for task, resolved_task in zip(tasks, resolved)
+        if task != resolved_task
+    ]
+    if remapped:
+        print(f"Resolved lm-eval task aliases: {', '.join(remapped)}")
+    return resolved
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Run lm-eval on a saved FlatQuant EXAONE-4.5 packed checkpoint."
@@ -134,6 +150,7 @@ def main():
     from lm_eval.models.huggingface import HFLM
 
     _patch_transformers_vision2seq_alias()
+    tasks = _resolve_lm_eval_task_aliases(args.tasks)
 
     tokenizer_name = args.tokenizer or _infer_tokenizer_name(args.model_path)
     if tokenizer_name is None:
@@ -160,7 +177,7 @@ def main():
     )
     results = lm_eval.simple_evaluate(
         model=hflm,
-        tasks=args.tasks,
+        tasks=tasks,
         num_fewshot=args.num_fewshot,
         batch_size=args.batch_size,
         limit=args.limit,
@@ -174,7 +191,7 @@ def main():
 
     output_path = args.output_path
     if output_path is None:
-        suffix = "_".join(args.tasks)
+        suffix = "_".join(tasks)
         if args.limit is not None:
             suffix += f"_limit{args.limit:g}"
         output_dir = Path(args.model_path) / "lm_eval_results"

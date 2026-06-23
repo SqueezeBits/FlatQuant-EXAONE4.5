@@ -20,11 +20,20 @@ def remove_unwanted_pytorch_nvcc_flags():
             pass
 
 def get_cuda_arch_flags():
-    return [
-        '-gencode', 'arch=compute_75,code=sm_75',  # Turing
-        '-gencode', 'arch=compute_80,code=sm_80',  # Ampere
-        '-gencode', 'arch=compute_86,code=sm_86',  # Ampere
-    ]
+    import subprocess, shutil
+
+    candidates = ["75", "80", "86", "90"]
+    nvcc = shutil.which("nvcc")
+    if nvcc is not None:
+        try:
+            supported = set(subprocess.check_output([nvcc, "--list-gpu-arch"], text=True).split())
+            candidates = [arch for arch in candidates if f"compute_{arch}" in supported]
+        except Exception:
+            pass
+    flags = []
+    for arch in candidates:
+        flags.extend(["-gencode", f"arch=compute_{arch},code=sm_{arch}"])
+    return flags
     
 def third_party_cmake(extra_pip_flags=None):
     import subprocess, sys, shutil
@@ -44,16 +53,25 @@ def third_party_cmake(extra_pip_flags=None):
 
     # install fast hadamard transform
     hadamard_dir = os.path.join(HERE, 'third-party/fast-hadamard-transform')
+    try:
+        import fast_hadamard_transform  # noqa: F401
+        return
+    except ImportError:
+        pass
     pip = shutil.which('pip')
     
-    # Build pip command with base flags
-    pip_cmd = [pip, 'install', '-e', hadamard_dir]
+    # Build pip command with base flags. Use the current interpreter so the
+    # fast-hadamard-transform build can see the same torch installation.
+    pip_cmd = [sys.executable, '-m', 'pip', 'install', '-e', hadamard_dir, '--no-build-isolation', '--no-deps']
     
     # Add extra flags if provided
     if extra_pip_flags:
         pip_cmd.extend(extra_pip_flags)
     
     retcode = subprocess.call(pip_cmd)
+    if retcode != 0:
+        sys.stderr.write("Error: fast-hadamard-transform installation failed.\n")
+        sys.exit(1)
 
 def get_build_args():
     """Get pip build arguments from BUILD_ARGS environment variable"""
@@ -75,6 +93,19 @@ def get_kernels():
     else:
         return default_kernels
 
+
+def get_include_dirs():
+    include_dirs = [
+        os.path.join(setup_dir, 'deploy/kernels/include'),
+        os.path.join(setup_dir, 'third-party/cutlass/include'),
+        os.path.join(setup_dir, 'third-party/cutlass/tools/util/include'),
+    ]
+    cuda_home = torch_cpp_ext.CUDA_HOME or os.environ.get('CUDA_HOME') or '/usr/local/cuda'
+    cccl_include = os.path.join(cuda_home, 'include', 'cccl')
+    if os.path.isdir(cccl_include):
+        include_dirs.append(cccl_include)
+    return include_dirs
+
 if __name__ == '__main__':
     # Get build args from environment variable
     extra_pip_flags = get_build_args()
@@ -90,11 +121,7 @@ if __name__ == '__main__':
             CUDAExtension(
                 name='deploy._CUDA',
                 sources=get_kernels(),
-                include_dirs=[
-                    os.path.join(setup_dir, 'deploy/kernels/include'),
-                    os.path.join(setup_dir, 'third-party/cutlass/include'),
-                    os.path.join(setup_dir, 'third-party/cutlass/tools/util/include')
-                ],
+                include_dirs=get_include_dirs(),
                 extra_compile_args={
                     'cxx': [],
                     'nvcc': get_cuda_arch_flags(),

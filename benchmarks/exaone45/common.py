@@ -20,6 +20,7 @@ try:
 except ImportError:
     from transformers.initialization import no_init_weights
 
+from deploy.nn import LinearW4A16, LinearW4A16Marlin, is_marlin_available
 from deploy.transformers.modeling_exaone4_5 import FlatQuantExaone45ForConditionalGeneration
 from transformers.models.exaone4_5.modeling_exaone4_5 import (
     Exaone4_5_ForConditionalGeneration,
@@ -252,25 +253,6 @@ def _iter_safetensor_paths(model_path):
     raise FileNotFoundError(f"No safetensors checkpoint found under {model_path}")
 
 
-def _unpack_signed_i4(packed):
-    lo = (packed & 0x0F).to(torch.int16)
-    hi = ((packed >> 4) & 0x0F).to(torch.int16)
-    unpacked = torch.empty(
-        packed.shape[:-1] + (packed.shape[-1] * 2,),
-        dtype=torch.int16,
-        device=packed.device,
-    )
-    unpacked[..., 0::2] = lo
-    unpacked[..., 1::2] = hi
-    unpacked = torch.where(unpacked >= 8, unpacked - 16, unpacked)
-    return unpacked.to(torch.int8)
-
-
-def _dequantize_packed_i4_weight(packed_weight, scale, dtype):
-    unpacked = _unpack_signed_i4(packed_weight).to(torch.float32)
-    return (unpacked * scale.to(torch.float32)).to(dtype).contiguous()
-
-
 def _quantizer_scale_key(weight_key):
     return f"quantizer.{weight_key[:-len('.weight')]}.scale"
 
@@ -342,6 +324,27 @@ def _prepare_flatquant_eval_modules(model):
     _set_flatquant_eval_flags(model)
 
 
+def _select_weight_only_runtime(device):
+    if is_marlin_available() and str(device).startswith("cuda"):
+        major, _ = torch.cuda.get_device_capability(device)
+        if major >= 8:
+            return LinearW4A16Marlin, torch.float16, "marlin"
+    return LinearW4A16, torch.bfloat16, "torch_int4pack"
+
+
+def _replace_weight_only_linears(model, linear_cls):
+    from flatquant.flat_linear import FlatQuantizedLinear
+
+    replaced = 0
+    for module in model.modules():
+        if isinstance(module, FlatQuantizedLinear):
+            module.linear = linear_cls.from_float(module.linear)
+            replaced += 1
+    if replaced == 0:
+        raise RuntimeError("No FlatQuantizedLinear modules were found for W4A16 conversion.")
+    return replaced
+
+
 def _is_runtime_state_key(key):
     if key.startswith("quantizer."):
         return False
@@ -360,9 +363,20 @@ def load_flatquant_weight_only_model(model_path, device, dtype, hf_token=None, a
     if not quant_config.get("symmetric", True):
         raise NotImplementedError("weight_only FlatQuant eval currently supports symmetric packed int4 only.")
 
-    dtype = parse_dtype(dtype)
-    if dtype == "auto":
-        dtype = torch.float16
+    model_dtype = parse_dtype(dtype)
+    if model_dtype == "auto":
+        model_dtype = torch.bfloat16
+    linear_cls, kernel_dtype, runtime_name = _select_weight_only_runtime(device)
+    if model_dtype == torch.float16:
+        print(
+            "Warning: FP16 model execution significantly degrades this checkpoint's "
+            "measured PPL. Use --flatquant_dtype bfloat16 for the reference W4A16 path."
+        )
+    if runtime_name == "torch_int4pack":
+        print(
+            "Warning: Marlin is unavailable; falling back to PyTorch int4pack. "
+            "This saves VRAM but is substantially slower for prefill."
+        )
 
     config_kwargs = {"trust_remote_code": True, **_token_kwarg(hf_token)}
     config = transformers.AutoConfig.from_pretrained(str(model_path), **config_kwargs)
@@ -377,22 +391,29 @@ def load_flatquant_weight_only_model(model_path, device, dtype, hf_token=None, a
     )
 
     dtype_old = torch.get_default_dtype()
-    torch.set_default_dtype(dtype)
+    torch.set_default_dtype(model_dtype)
     with no_init_weights():
         model = model_cls(config)
     torch.set_default_dtype(dtype_old)
 
     model = apply_flatquant_to_exaone45(_flatquant_args_from_config(quant_config), model)
     _prepare_flatquant_eval_modules(model)
+    replaced_linears = _replace_weight_only_linears(model, linear_cls)
     if hasattr(model, "generation_config"):
         model.generation_config.cache_implementation = None
 
+    if not str(device).startswith("cuda"):
+        raise NotImplementedError("Packed FlatQuant W4A16 inference currently requires CUDA.")
+    if runtime_name == "torch_int4pack" and not hasattr(torch.ops.aten, "_weight_int4pack_mm"):
+        raise RuntimeError("This PyTorch build does not provide aten._weight_int4pack_mm.")
+
     target_names = set(model.state_dict().keys())
     scales = _collect_weight_scales(model_path)
-    loaded_names = set()
     skipped_packed = []
+    shard_paths = _iter_safetensor_paths(model_path)
 
-    for shard_path in _iter_safetensor_paths(model_path):
+    for shard_index, shard_path in enumerate(shard_paths, start=1):
+        print(f"Loading W4A16 shard {shard_index}/{len(shard_paths)}: {shard_path.name}")
         with safe_open(str(shard_path), framework="pt") as f:
             for key in f.keys():
                 if not _is_runtime_state_key(key) or key not in target_names:
@@ -404,18 +425,43 @@ def load_flatquant_weight_only_model(model_path, device, dtype, hf_token=None, a
                     if scale is None:
                         skipped_packed.append(key)
                         continue
-                    tensor = _dequantize_packed_i4_weight(tensor, scale, dtype)
-                elif tensor.is_floating_point():
-                    tensor = tensor.to(dtype)
-
-                _assign_tensor(model, key, tensor)
-                loaded_names.add(key)
+                    parent_name = key.rsplit(".", 1)[0]
+                    linear = model.get_submodule(parent_name)
+                    if not isinstance(linear, linear_cls):
+                        raise TypeError(
+                            f"Expected {linear_cls.__name__} at {parent_name}, "
+                            f"got {type(linear).__name__}."
+                        )
+                    linear.load_packed_weight(tensor, scale, device=device)
+                else:
+                    if tensor.is_floating_point():
+                        tensor = tensor.to(model_dtype)
+                    _assign_tensor(model, key, tensor)
 
     if skipped_packed:
         raise KeyError(f"Missing quantizer scales for {len(skipped_packed)} packed weights; first: {skipped_packed[0]}")
 
+    loaded_packed = sum(
+        isinstance(module, linear_cls) and module.weight.numel() > 0
+        for module in model.modules()
+    )
+    if loaded_packed != replaced_linears:
+        raise RuntimeError(
+            f"Loaded {loaded_packed} packed W4A16 linears, expected {replaced_linears}."
+        )
+
     _set_flatquant_eval_flags(model)
-    return model.eval().to(device=device, dtype=dtype)
+    print(f"Loaded {loaded_packed} packed W4A16 linear layers with {runtime_name}.")
+    model = model.eval().to(device=device, dtype=model_dtype)
+    if linear_cls is LinearW4A16Marlin:
+        for module in model.modules():
+            if isinstance(module, LinearW4A16Marlin):
+                module.weight_scales = module.weight_scales.to(dtype=kernel_dtype)
+
+    model.flatquant_runtime = runtime_name
+    model.flatquant_runtime_dtype = str(model_dtype).removeprefix("torch.")
+    model.flatquant_kernel_dtype = str(kernel_dtype).removeprefix("torch.")
+    return model
 
 
 def resolve_flatquant_eval_mode(model_path, requested_mode):
@@ -425,7 +471,7 @@ def resolve_flatquant_eval_mode(model_path, requested_mode):
     return "weight_only" if is_weight_only_flatquant(quant_config) else "deploy"
 
 
-def load_flatquant_model(model_path, device, dtype="float16", hf_token=None, eval_mode="auto", attn_implementation="eager"):
+def load_flatquant_model(model_path, device, dtype="bfloat16", hf_token=None, eval_mode="auto", attn_implementation="eager"):
     eval_mode = resolve_flatquant_eval_mode(model_path, eval_mode)
     if eval_mode == "weight_only":
         model = load_flatquant_weight_only_model(
@@ -514,7 +560,17 @@ def load_model_from_spec(spec, device="cuda", hf_token=None, attn_implementation
             eval_mode=spec.flatquant_eval_mode,
             attn_implementation=attn_implementation,
         )
-        return model, {"model_kind": kind, "flatquant_eval_mode": flatquant_eval_mode}
+        metadata = {"model_kind": kind, "flatquant_eval_mode": flatquant_eval_mode}
+        flatquant_runtime = getattr(model, "flatquant_runtime", None)
+        if flatquant_runtime is not None:
+            metadata["flatquant_runtime"] = flatquant_runtime
+        runtime_dtype = getattr(model, "flatquant_runtime_dtype", None)
+        if runtime_dtype is not None:
+            metadata["flatquant_runtime_dtype"] = runtime_dtype
+        kernel_dtype = getattr(model, "flatquant_kernel_dtype", None)
+        if kernel_dtype is not None:
+            metadata["flatquant_kernel_dtype"] = kernel_dtype
+        return model, metadata
 
     quantized = kind == "awq"
     model = load_hf_model(
@@ -612,7 +668,7 @@ def build_model_specs(args, default_models=None):
                     label=label,
                     kind="flatquant",
                     path=flatquant_path,
-                    dtype=getattr(args, "flatquant_dtype", "float16"),
+                    dtype=getattr(args, "flatquant_dtype", "bfloat16"),
                     tokenizer=getattr(args, "flatquant_tokenizer", None) or getattr(args, "tokenizer", None),
                     processor=getattr(args, "flatquant_processor", None) or getattr(args, "processor", None),
                     flatquant_eval_mode=getattr(args, "flatquant_eval_mode", "auto"),
@@ -648,7 +704,7 @@ def add_model_args(parser, default_models=None, include_processor=False):
     parser.add_argument("--dtype", default="float16")
     parser.add_argument("--bf16_dtype", default="bfloat16")
     parser.add_argument("--awq_dtype", default="auto")
-    parser.add_argument("--flatquant_dtype", default="float16")
+    parser.add_argument("--flatquant_dtype", default="bfloat16")
     parser.add_argument("--device_map", default=None)
     parser.add_argument("--bf16_device_map", default=None)
     parser.add_argument("--awq_device_map", default=None)

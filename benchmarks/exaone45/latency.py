@@ -423,6 +423,12 @@ def _run_latency_for_spec(args, spec, output_path=None, output_dir=None):
         )
         if metadata.get("flatquant_eval_mode") is not None:
             result["flatquant_eval_mode"] = metadata["flatquant_eval_mode"]
+        if metadata.get("flatquant_runtime") is not None:
+            result["flatquant_runtime"] = metadata["flatquant_runtime"]
+        if metadata.get("flatquant_runtime_dtype") is not None:
+            result["flatquant_runtime_dtype"] = metadata["flatquant_runtime_dtype"]
+        if metadata.get("flatquant_kernel_dtype") is not None:
+            result["flatquant_kernel_dtype"] = metadata["flatquant_kernel_dtype"]
 
         print_summary(result)
         print(json.dumps(result, indent=2, sort_keys=True))
@@ -531,7 +537,7 @@ def main():
     )
     parser.add_argument("--bf16_dtype", default="bfloat16")
     parser.add_argument("--awq_dtype", default="auto")
-    parser.add_argument("--flatquant_dtype", default="float16")
+    parser.add_argument("--flatquant_dtype", default="bfloat16")
     parser.add_argument("--flatquant_eval_mode", default="auto", choices=["auto", "deploy", "weight_only"])
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--prefill_seq_len", type=int, default=2048)

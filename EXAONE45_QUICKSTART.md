@@ -4,6 +4,7 @@
 
 ```bash
 cd /workspace/FlatQuant
+git submodule update --init --recursive
 
 /venv/main/bin/python -m venv --system-site-packages /workspace/.venvs/flatquant-exaone
 source /workspace/.venvs/flatquant-exaone/bin/activate
@@ -79,6 +80,7 @@ python benchmarks/benchmark_exaone45.py ppl \
   --flatquant_model_paths ./outputs/EXAONE-4.5-33B/w4a4/exaone45-33b-w4a4-e15-lr5e3-ppl \
     ./outputs/EXAONE-4.5-33B/w4a16/exaone45-33b-w4a16-e15-lr5e3 \
   --flatquant_labels FlatQuant-W4A4 FlatQuant-W4A16 \
+  --flatquant_dtype bfloat16 \
   --datasets wikitext2 c4 \
   --seqlen 2048 \
   --max_samples 100000 \
@@ -94,6 +96,7 @@ python benchmarks/benchmark_exaone45.py latency \
   --flatquant_model_paths ./outputs/EXAONE-4.5-33B/w4a4/exaone45-33b-w4a4-e15-lr5e3-ppl \
     ./outputs/EXAONE-4.5-33B/w4a16/exaone45-33b-w4a16-e15-lr5e3 \
   --flatquant_labels FlatQuant-W4A4 FlatQuant-W4A16 \
+  --flatquant_dtype bfloat16 \
   --batch_size 1 \
   --prefill_seq_len 2048 \
   --decode_steps 256 \
@@ -106,15 +109,16 @@ python benchmarks/benchmark_exaone45.py latency \
 
 ```bash
 python benchmarks/benchmark_exaone45.py eval \
-  --models awq flatquant \
+  --models flatquant \
   --awq_model_path /workspace/.hf_home/hub/models--LGAI-EXAONE--EXAONE-4.5-33B-AWQ/snapshots/d73d64aa670777f94f101916ea0803e033ba9b59 \
-  --flatquant_model_paths ./outputs/EXAONE-4.5-33B/w4a4/exaone45-33b-w4a4-e15-lr5e3-ppl \
-    ./outputs/EXAONE-4.5-33B/w4a16/exaone45-33b-w4a16-e15-lr5e3 \
-  --flatquant_labels FlatQuant-W4A4 FlatQuant-W4A16 \
+  --flatquant_model_paths ./outputs/EXAONE-4.5-33B/w4a16/exaone45-33b-w4a16-e15-lr5e3 \
+  --flatquant_labels FlatQuant-W4A16 \
+  --flatquant_dtype bfloat16 \
   --tasks mmlu-pro \
   --num_fewshot 5 \
-  --batch_size 1 \
+  --batch_size 8 \
   --max_length 4096 \
+  --limit 100 \
   --attn_implementation sdpa
 ```
 
@@ -125,6 +129,7 @@ python benchmarks/benchmark_exaone45.py eval \
   --flatquant_model_paths ./outputs/EXAONE-4.5-33B/w4a4/exaone45-33b-w4a4-e15-lr5e3-ppl \
     ./outputs/EXAONE-4.5-33B/w4a16/exaone45-33b-w4a16-e15-lr5e3 \
   --flatquant_labels FlatQuant-W4A4 FlatQuant-W4A16 \
+  --flatquant_dtype bfloat16 \
   --tasks mmlu_abstract_algebra \
   --num_fewshot 5 \
   --limit 10 \
@@ -146,6 +151,7 @@ python benchmarks/benchmark_exaone45.py eval \
   --flatquant_model_paths ./outputs/EXAONE-4.5-33B/w4a4/exaone45-33b-w4a4-e15-lr5e3-ppl \
     ./outputs/EXAONE-4.5-33B/w4a16/exaone45-33b-w4a16-e15-lr5e3 \
   --flatquant_labels FlatQuant-W4A4 FlatQuant-W4A16 \
+  --flatquant_dtype bfloat16 \
   --tasks mmmu_val mmmu_pro mathvista_testmini mathvision_testmini wemath logicvista charxiv \
   --batch_size 1 \
   --max_new_tokens 128 \
@@ -161,6 +167,7 @@ python benchmarks/benchmark_exaone45.py profile \
   --flatquant_model_paths ./outputs/EXAONE-4.5-33B/w4a4/exaone45-33b-w4a4-e15-lr5e3-ppl \
     ./outputs/EXAONE-4.5-33B/w4a16/exaone45-33b-w4a16-e15-lr5e3 \
   --flatquant_labels FlatQuant-W4A4 FlatQuant-W4A16 \
+  --flatquant_dtype bfloat16 \
   --batch_size 1 \
   --prefill_seq_len 2048 \
   --layers 0 31 63 \

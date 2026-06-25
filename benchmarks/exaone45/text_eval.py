@@ -233,6 +233,12 @@ def _run_lm_eval_for_spec(args, spec, tasks, output_path=None, output_dir=None):
         }
         if metadata.get("flatquant_eval_mode") is not None:
             payload["flatquant_eval_mode"] = metadata["flatquant_eval_mode"]
+        if metadata.get("flatquant_runtime") is not None:
+            payload["flatquant_runtime"] = metadata["flatquant_runtime"]
+        if metadata.get("flatquant_runtime_dtype") is not None:
+            payload["flatquant_runtime_dtype"] = metadata["flatquant_runtime_dtype"]
+        if metadata.get("flatquant_kernel_dtype") is not None:
+            payload["flatquant_kernel_dtype"] = metadata["flatquant_kernel_dtype"]
 
         if output_path is None:
             if output_dir is not None:
@@ -327,7 +333,7 @@ def main():
     parser.add_argument("--dtype", default="float16", choices=["auto", "float16", "fp16", "bfloat16", "bf16", "float32", "fp32"])
     parser.add_argument("--bf16_dtype", default="bfloat16")
     parser.add_argument("--awq_dtype", default="auto")
-    parser.add_argument("--flatquant_dtype", default="float16")
+    parser.add_argument("--flatquant_dtype", default="bfloat16")
     parser.add_argument("--flatquant_eval_mode", default="auto", choices=["auto", "deploy", "weight_only"])
     parser.add_argument("--device_map", default=None)
     parser.add_argument("--bf16_device_map", default=None)

@@ -331,6 +331,9 @@ def _build_exaone_lmms_class(lmms_base, GenerationResult, TokenCounts):
                 attn_implementation=attn_implementation,
             )
             self.flatquant_eval_mode = metadata.get("flatquant_eval_mode")
+            self.flatquant_runtime = metadata.get("flatquant_runtime")
+            self.flatquant_runtime_dtype = metadata.get("flatquant_runtime_dtype")
+            self.flatquant_kernel_dtype = metadata.get("flatquant_kernel_dtype")
 
             if hasattr(self._model, "generation_config"):
                 self._model.generation_config.cache_implementation = None
@@ -681,7 +684,10 @@ def run_one_model(args, spec: ModelSpec, tasks: Sequence[str], output_dir: Path)
             "dtype": spec.dtype,
             "tokenizer": spec.tokenizer,
             "processor": spec.processor,
-            "flatquant_eval_mode": spec.flatquant_eval_mode if spec.kind == "flatquant" else None,
+            "flatquant_eval_mode": getattr(lm, "flatquant_eval_mode", None),
+            "flatquant_runtime": getattr(lm, "flatquant_runtime", None),
+            "flatquant_runtime_dtype": getattr(lm, "flatquant_runtime_dtype", None),
+            "flatquant_kernel_dtype": getattr(lm, "flatquant_kernel_dtype", None),
             "attn_implementation": args.attn_implementation,
             "use_cache": not args.no_use_cache,
             "summary": summary,

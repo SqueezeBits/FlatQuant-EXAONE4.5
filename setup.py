@@ -35,6 +35,23 @@ def get_cuda_arch_flags():
         flags.extend(["-gencode", f"arch=compute_{arch},code=sm_{arch}"])
     return flags
     
+def get_marlin_arch_flags():
+    import subprocess, shutil
+
+    candidates = ["80", "86", "89", "90"]
+    nvcc = shutil.which("nvcc")
+    if nvcc is not None:
+        try:
+            supported = set(subprocess.check_output([nvcc, "--list-gpu-arch"], text=True).split())
+            candidates = [arch for arch in candidates if f"compute_{arch}" in supported]
+        except Exception:
+            pass
+    flags = []
+    for arch in candidates:
+        flags.extend(["-gencode", f"arch=compute_{arch},code=sm_{arch}"])
+    return flags
+
+
 def third_party_cmake(extra_pip_flags=None):
     import subprocess, sys, shutil
     
@@ -94,6 +111,42 @@ def get_kernels():
         return default_kernels
 
 
+def get_marlin_kernels():
+    return [
+        'third-party/marlin/marlin/marlin_cuda.cpp',
+        'third-party/marlin/marlin/marlin_cuda_kernel.cu',
+    ]
+
+
+def get_extensions():
+    extensions = [
+        CUDAExtension(
+            name='deploy._CUDA',
+            sources=get_kernels(),
+            include_dirs=get_include_dirs(),
+            extra_compile_args={
+                'cxx': [],
+                'nvcc': get_cuda_arch_flags(),
+            }
+        )
+    ]
+    marlin_sources = get_marlin_kernels()
+    if all(os.path.exists(os.path.join(setup_dir, source)) for source in marlin_sources):
+        extensions.append(
+            CUDAExtension(
+                name='deploy._MARLIN',
+                sources=marlin_sources,
+                extra_compile_args={
+                    'cxx': [],
+                    'nvcc': get_marlin_arch_flags(),
+                }
+            )
+        )
+    else:
+        print('Warning: third-party/marlin is unavailable; building without Marlin W4A16 support.')
+    return extensions
+
+
 def get_include_dirs():
     include_dirs = [
         os.path.join(setup_dir, 'deploy/kernels/include'),
@@ -117,17 +170,7 @@ if __name__ == '__main__':
     setup(
         name='flatquant',
         packages=['flatquant', 'deploy'],
-        ext_modules=[
-            CUDAExtension(
-                name='deploy._CUDA',
-                sources=get_kernels(),
-                include_dirs=get_include_dirs(),
-                extra_compile_args={
-                    'cxx': [],
-                    'nvcc': get_cuda_arch_flags(),
-                }
-            )
-        ],
+        ext_modules=get_extensions(),
         cmdclass={
             'build_ext': BuildExtension
         }

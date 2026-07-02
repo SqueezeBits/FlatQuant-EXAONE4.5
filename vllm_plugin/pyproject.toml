@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flatquant-vllm-plugin"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = ["vllm==0.24.0"]
+
+[project.entry-points."vllm.general_plugins"]
+flatquant = "flatquant_vllm_plugin:register"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["flatquant_vllm_plugin*"]

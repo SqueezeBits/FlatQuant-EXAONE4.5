@@ -130,7 +130,7 @@ This work builds on [FlatQuant](https://github.com/ruikangliu/FlatQuant) and
 ```bibtex
 @article{sun2024flatquant,
   title={FlatQuant: Flatness Matters for LLM Quantization},
-  author={Sun, Yuxuan and Liu, Ruikang and Bai, Haoli and others},
+  author={Sun, Yuxuan and Liu, Ruikang and Bai, Haoli and Bao, Han and Zhao, Kang and Li, Yuening and Hu, Jiaxin and Yu, Xianzhi and Hou, Lu and Yuan, Chun and others},
   journal={arXiv preprint arXiv:2410.09426},
   year={2024}
 }

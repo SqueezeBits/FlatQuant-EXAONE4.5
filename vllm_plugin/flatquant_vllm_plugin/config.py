@@ -9,6 +9,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsConfig,
 )
 from vllm.model_executor.layers.linear import LinearMethodBase
+from vllm.model_executor.utils import set_weight_attrs
 
 from .transform import apply_transform, decompose_dim
 
@@ -48,11 +49,15 @@ class FlatQuantLinearMethod(LinearMethodBase):
             "flatquant_left",
             nn.Parameter(torch.empty(left_size, left_size, dtype=params_dtype), requires_grad=False),
         )
+        # TP=1 intentionally loads the complete transform for fused projections.
+        set_weight_attrs(layer.flatquant_left, {"ignore_warning": True})
         if right_size is not None:
             layer.register_parameter(
                 "flatquant_right",
                 nn.Parameter(torch.empty(right_size, right_size, dtype=params_dtype), requires_grad=False),
             )
+
+            set_weight_attrs(layer.flatquant_right, {"ignore_warning": True})
 
     def process_weights_after_loading(self, layer):
         self.inner.process_weights_after_loading(layer)

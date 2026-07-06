@@ -47,6 +47,20 @@ def add_engine_arg(parser):
     )
 
 
+def require_vllm_engine():
+    """Fail early with an actionable message if vLLM is not importable."""
+    import importlib.util
+
+    if importlib.util.find_spec("vllm") is None:
+        raise SystemExit(
+            "--engine vllm requires vLLM, which is not importable in the current "
+            "environment. Run the vLLM benchmarks from the flatquant-vllm venv:\n"
+            "  source /workspace/.venvs/flatquant-vllm/bin/activate\n"
+            "  export PYTHONPATH=/workspace/FlatQuant:$PYTHONPATH\n"
+            "(The default --engine hf uses the flatquant-exaone venv.)"
+        )
+
+
 def _vllm_dtype(spec):
     dtype = (spec.dtype or "auto").lower()
     if dtype in ("auto",):
@@ -99,6 +113,7 @@ def assert_vllm_supported(spec):
 
 def build_llm(spec, args, **overrides):
     """Build a vLLM ``LLM`` for a :class:`common.ModelSpec`."""
+    require_vllm_engine()
     from vllm import LLM
 
     assert_vllm_supported(spec)
@@ -124,6 +139,7 @@ def build_llm(spec, args, **overrides):
 
 def vllm_model_args(spec, args, extra=None):
     """Build the ``model_args`` dict for lm-eval / lmms-eval vLLM backends."""
+    require_vllm_engine()
     assert_vllm_supported(spec)
     tokenizer = spec.tokenizer or getattr(args, "tokenizer", None)
     model_args = {

@@ -1,5 +1,7 @@
 import argparse
 import ast
+import contextlib
+import functools
 import gc
 import json
 import os
@@ -341,16 +343,22 @@ def _require_lmms_eval():
     return evaluator, lmms_utils, lmms, TaskManager, GenerationResult, TokenCounts
 
 
-def _patch_mmmu_pro_vision_parser() -> None:
-    """Parse option letters for MMMU-Pro Vision before exact-match scoring."""
-    try:
-        from lmms_eval.tasks.mmmu_pro import utils as mmmu_pro_utils
-    except (ImportError, ModuleNotFoundError):
-        return
+def _wrap_mmmu_pro_process_results(original):
+    """Return a process_results that parses option letters for MMMU-Pro Vision.
 
-    original = mmmu_pro_utils.mmmu_pro_process_results
+    MMMU-Pro Vision docs render the question and options inside the image, so the
+    dataset row has ``options`` and ``answer`` but no ``question``. Upstream
+    ``mmmu_pro_process_results`` only parses the multiple-choice answer when both
+    ``question`` and ``options`` are present; for the vision subtask it falls back
+    to ``parsed_pred = pred`` (the raw generation), which is then scored with an
+    exact string match against a single gold letter. Any model that emits more
+    than a bare letter (e.g. EXAONE-4.5's reasoning) therefore scores 0. Detect
+    the vision subtask and parse the letter out of the response instead.
+    """
     if getattr(original, "_flatquant_vision_parser_patch", False):
-        return
+        return original
+
+    from lmms_eval.tasks.mmmu_pro import utils as mmmu_pro_utils
 
     def process_results_with_vision_parser(doc, results):
         if "question" in doc or "options" not in doc:
@@ -371,7 +379,47 @@ def _patch_mmmu_pro_vision_parser() -> None:
         return {"mmmu_acc": mmmu_acc}
 
     process_results_with_vision_parser._flatquant_vision_parser_patch = True
-    mmmu_pro_utils.mmmu_pro_process_results = process_results_with_vision_parser
+    process_results_with_vision_parser.__name__ = original.__name__
+    return process_results_with_vision_parser
+
+
+def _patch_mmmu_pro_vision_parser() -> None:
+    """Parse option letters for MMMU-Pro Vision before exact-match scoring.
+
+    Patching ``lmms_eval.tasks.mmmu_pro.utils.mmmu_pro_process_results`` on the
+    package module is *not enough*: lmms-eval resolves the task's
+    ``!function utils.mmmu_pro_process_results`` via ``utils.import_function``,
+    which ``exec_module``s the task's ``utils.py`` into a brand-new module object
+    each time and reads the pristine function from there — bypassing any monkey
+    patch on the ``sys.modules`` copy. So we also wrap ``import_function`` itself
+    so the function actually bound to the task is the parsing variant.
+    """
+    try:
+        from lmms_eval.tasks.mmmu_pro import utils as mmmu_pro_utils
+        import lmms_eval.utils as lmms_utils
+    except (ImportError, ModuleNotFoundError):
+        return
+
+    # Cover any code path that reads the attribute off the package module.
+    mmmu_pro_utils.mmmu_pro_process_results = _wrap_mmmu_pro_process_results(
+        mmmu_pro_utils.mmmu_pro_process_results
+    )
+
+    # The path that actually matters: intercept the YAML `!function` resolver so
+    # the freshly exec'd task function gets wrapped too.
+    original_import_function = lmms_utils.import_function
+    if getattr(original_import_function, "_flatquant_vision_parser_patch", False):
+        return
+
+    @functools.wraps(original_import_function)
+    def import_function_with_vision_parser(loader, node):
+        function = original_import_function(loader, node)
+        if getattr(function, "__name__", "") == "mmmu_pro_process_results":
+            return _wrap_mmmu_pro_process_results(function)
+        return function
+
+    import_function_with_vision_parser._flatquant_vision_parser_patch = True
+    lmms_utils.import_function = import_function_with_vision_parser
 
 
 def _patch_lmms_eval_yaml_includes(lmms_utils) -> None:
@@ -846,6 +894,7 @@ def _vllm_model_args_string(args, spec) -> str:
         f"max_model_len={args.max_model_len}",
         f"max_new_tokens={args.max_new_tokens}",
         f"dtype={dtype}",
+        "disable_log_stats=True",
     ]
     if args.max_pixels:
         parts.append(f"max_pixels={args.max_pixels}")
@@ -856,7 +905,35 @@ def _vllm_model_args_string(args, spec) -> str:
     return ",".join(parts)
 
 
+@contextlib.contextmanager
+def _quiet_vllm_inner_progress():
+    """Hide vLLM's per-batch bars while lmms-eval shows overall progress."""
+    from vllm import LLM
+
+    original_chat = LLM.chat
+
+    @functools.wraps(original_chat)
+    def quiet_chat(self, *args, **kwargs):
+        kwargs.setdefault("use_tqdm", False)
+        return original_chat(self, *args, **kwargs)
+
+    LLM.chat = quiet_chat
+    try:
+        yield
+    finally:
+        LLM.chat = original_chat
+
+
+def _shutdown_vllm_model(lm) -> None:
+    """Synchronously release an offline vLLM engine between model variants."""
+    engine = getattr(getattr(lm, "client", None), "llm_engine", None)
+    engine_core = getattr(engine, "engine_core", None)
+    if engine_core is not None:
+        engine_core.shutdown()
+
+
 def run_one_model_vllm(args, spec: ModelSpec, tasks: Sequence[str], output_dir: Path) -> Dict[str, Any]:
+    vllm_common.require_vllm_engine()
     evaluator, lmms_utils, lmms_base, TaskManager, GenerationResult, TokenCounts = _require_lmms_eval()
     vllm_common.assert_vllm_supported(spec)
 
@@ -873,26 +950,38 @@ def run_one_model_vllm(args, spec: ModelSpec, tasks: Sequence[str], output_dir: 
     model_args = _vllm_model_args_string(args, spec)
     print(f"lmms-eval vllm model_args: {model_args}")
     seeds = _parse_seed(args.seed)
-    results = evaluator.simple_evaluate(
-        model="vllm",
-        model_args=model_args,
-        tasks=matched_tasks,
-        num_fewshot=args.num_fewshot,
-        batch_size=args.batch_size,
-        use_cache=args.response_cache,
-        limit=args.limit,
-        offset=args.offset,
-        log_samples=args.log_samples,
-        task_manager=task_manager,
-        verbosity=args.verbosity,
-        gen_kwargs=_gen_kwargs_arg(args),
-        predict_only=args.predict_only,
-        random_seed=seeds[0],
-        numpy_random_seed=seeds[1],
-        torch_random_seed=seeds[2],
-        fewshot_random_seed=seeds[3],
-        bootstrap_iters=args.bootstrap_iters,
+    from lmms_eval import models
+
+    lm = models.get_model("vllm", args.force_simple).create_from_arg_string(
+        model_args,
+        {"batch_size": args.batch_size},
     )
+    try:
+        with _quiet_vllm_inner_progress():
+            results = evaluator.simple_evaluate(
+                model=lm,
+                model_args=model_args,
+                tasks=matched_tasks,
+                num_fewshot=args.num_fewshot,
+                batch_size=args.batch_size,
+                use_cache=args.response_cache,
+                limit=args.limit,
+                offset=args.offset,
+                log_samples=args.log_samples,
+                task_manager=task_manager,
+                verbosity=args.verbosity,
+                gen_kwargs=_gen_kwargs_arg(args),
+                predict_only=args.predict_only,
+                random_seed=seeds[0],
+                numpy_random_seed=seeds[1],
+                torch_random_seed=seeds[2],
+                fewshot_random_seed=seeds[3],
+                bootstrap_iters=args.bootstrap_iters,
+            )
+    finally:
+        _shutdown_vllm_model(lm)
+        del lm
+        _cleanup(args.device)
     if results is None:
         raise RuntimeError("lmms-eval returned no results on this process.")
 

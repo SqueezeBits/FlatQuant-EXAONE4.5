@@ -77,6 +77,19 @@ class FlatQuantConfig(CompressedTensorsConfig):
     def get_quant_method(self, layer, prefix):
         method = super().get_quant_method(layer, prefix)
         transform_suffixes = (".qkv_proj", ".gate_up_proj", ".down_proj", ".o_proj")
-        if method is not None and prefix.endswith(transform_suffixes):
+        # Only the language-model decoder layers carry FlatQuant transforms.
+        # The vision tower exposes ``visual.blocks.N.mlp.down_proj``, which also
+        # ends with ``.down_proj`` but is in the compressed-tensors ignore list
+        # (so ``super()`` returns an UnquantizedLinearMethod, not None) and has
+        # no exported ``flatquant_left/right`` weights. Wrapping it would apply an
+        # uninitialized Kronecker transform to the vision activations and corrupt
+        # image embeddings, leaving text/ppl intact while multimodal prefill
+        # degenerates. Restrict wrapping to the language-model decoder.
+        is_language_model = "language_model" in prefix and "visual" not in prefix
+        if (
+            method is not None
+            and is_language_model
+            and prefix.endswith(transform_suffixes)
+        ):
             return FlatQuantLinearMethod(method, prefix)
         return method

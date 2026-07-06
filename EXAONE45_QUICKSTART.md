@@ -141,9 +141,9 @@ produced by `tools/export_flatquant_vllm.py` (its `config.json` must carry
 `--tensor_parallel_size`, and `--enforce_eager` (disable torch.compile + CUDA
 graphs; omit it to benchmark the CUDA-graph path).
 
-`W4A16` below is shorthand for
-`outputs/EXAONE-4.5-33B/w4a16-vllm/exaone45-33b-w4a16-vllm` and `AWQ_PATH` for
-the AWQ snapshot dir.
+The commands below use the concrete checkpoint paths on this machine
+(`outputs/EXAONE-4.5-33B/w4a16-vllm/exaone45-33b-w4a16-vllm` for the W4A16 vLLM
+export and the local AWQ snapshot).
 
 ### PPL (vLLM)
 
@@ -153,8 +153,8 @@ arithmetic (mean per-token cross-entropy over `seqlen` blocks).
 ```bash
 python benchmarks/benchmark_exaone45.py ppl \
   --models bf16 awq flatquant \
-  --awq_model_path AWQ_PATH \
-  --flatquant_model_paths W4A16 \
+  --awq_model_path /workspace/.hf_home/hub/models--LGAI-EXAONE--EXAONE-4.5-33B-AWQ/snapshots/d73d64aa670777f94f101916ea0803e033ba9b59 \
+  --flatquant_model_paths outputs/EXAONE-4.5-33B/w4a16-vllm/exaone45-33b-w4a16-vllm \
   --flatquant_labels FlatQuant-W4A16 \
   --engine vllm \
   --datasets wikitext2 c4 --seqlen 2048 --max_samples 100000
@@ -168,8 +168,9 @@ the eager baseline.
 
 ```bash
 python benchmarks/benchmark_exaone45.py latency \
-  --models flatquant \
-  --flatquant_model_paths W4A16 \
+  --models awq flatquant \
+  --awq_model_path /workspace/.hf_home/hub/models--LGAI-EXAONE--EXAONE-4.5-33B-AWQ/snapshots/d73d64aa670777f94f101916ea0803e033ba9b59 \
+  --flatquant_model_paths outputs/EXAONE-4.5-33B/w4a16-vllm/exaone45-33b-w4a16-vllm \
   --flatquant_labels FlatQuant-W4A16 \
   --engine vllm \
   --batch_size 1 --prefill_seq_len 2048 --decode_steps 256 \
@@ -182,15 +183,15 @@ Uses lm-eval's native `vllm` backend.
 
 ```bash
 python benchmarks/benchmark_exaone45.py eval \
-  --models awq flatquant \
-  --awq_model_path AWQ_PATH \
-  --flatquant_model_paths W4A16 \
+  --models flatquant \
+  --awq_model_path /workspace/.hf_home/hub/models--LGAI-EXAONE--EXAONE-4.5-33B-AWQ/snapshots/d73d64aa670777f94f101916ea0803e033ba9b59 \
+  --flatquant_model_paths outputs/EXAONE-4.5-33B/w4a16-vllm/exaone45-33b-w4a16-vllm \
   --flatquant_labels FlatQuant-W4A16 \
   --engine vllm \
   --tasks mmlu-pro --num_fewshot 5 --batch_size 8 --max_length 4096 --limit 100
 ```
 
-### VLM Eval (vLLM)
+###VLM Eval (vLLM)
 
 Uses lmms-eval's native `vllm` backend (EXAONE-4.5 loads as
 `Exaone4_5_ForConditionalGeneration`). Install it into the flatquant-vllm venv
@@ -220,11 +221,11 @@ done
 ```bash
 python benchmarks/benchmark_exaone45.py eval \
   --models awq flatquant \
-  --awq_model_path AWQ_PATH \
-  --flatquant_model_paths W4A16 \
+  --awq_model_path /workspace/.hf_home/hub/models--LGAI-EXAONE--EXAONE-4.5-33B-AWQ/snapshots/d73d64aa670777f94f101916ea0803e033ba9b59 \
+  --flatquant_model_paths outputs/EXAONE-4.5-33B/w4a16-vllm/exaone45-33b-w4a16-vllm \
   --flatquant_labels FlatQuant-W4A16 \
   --engine vllm \
-  --tasks mmmu_pro --batch_size 1 --max_new_tokens 128
+  --tasks mmmu_pro --batch_size 8 --max_new_tokens 512 --max_model_len 8192 --limit 10
 ```
 
 ## Compare PPL

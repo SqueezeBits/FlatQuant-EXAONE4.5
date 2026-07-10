@@ -4,6 +4,9 @@ FlatQuant W4A16 inference and evaluation for
 [LGAI-EXAONE/EXAONE-4.5-33B](https://huggingface.co/LGAI-EXAONE/EXAONE-4.5-33B),
 including a vLLM plugin backed by compressed-tensors/Marlin.
 
+The pre-quantized checkpoint is available on Hugging Face:
+[Hyun9junn/EXAONE-4.5-33B-FlatQuant-W4A16](https://huggingface.co/Hyun9junn/EXAONE-4.5-33B-FlatQuant-W4A16).
+
 This repository is derived from the official
 [ruikangliu/FlatQuant](https://github.com/ruikangliu/FlatQuant) implementation.
 It is independently maintained by SqueezeBits and is not an official repository

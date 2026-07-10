@@ -62,31 +62,31 @@ Five-shot evaluation with lm-eval:
 
 ```bash
 python benchmarks/benchmark_exaone45.py eval \
-  --models flatquant \
+  --models bf16 awq flatquant \
   --awq_model_path LGAI-EXAONE/EXAONE-4.5-33B-AWQ \
   --flatquant_model_paths Hyun9junn/EXAONE-4.5-33B-FlatQuant-W4A16 \
   --flatquant_labels FlatQuant-W4A16 \
   --engine vllm \
-  --tasks mmlu-pro --num_fewshot 5 --batch_size 8 --max_length 4096
+  --tasks mmlu-pro --num_fewshot 5 --batch_size 8 --max_length 8192
 ```
 
-| Subject | AWQ | FlatQuant W4A16 | Delta |
+| Subject | BF16 | AWQ | FlatQuant W4A16 |
 | --- | ---: | ---: | ---: |
-| **Overall** | **68.79** | **70.07** | **+1.28** |
-| Biology | 81.17 | 80.33 | -0.84 |
-| Business | 68.44 | 71.36 | +2.92 |
-| Chemistry | 71.11 | 74.29 | +3.18 |
-| Computer Science | 73.17 | 73.90 | +0.73 |
-| Economics | 77.25 | 76.42 | -0.83 |
-| Engineering | 48.71 | 49.95 | +1.24 |
-| Health | 72.25 | 74.21 | +1.96 |
-| History | 62.99 | 61.68 | -1.31 |
-| Law | 46.05 | 46.78 | +0.73 |
-| Math | 82.90 | 83.72 | +0.82 |
-| Other | 65.04 | 65.04 | 0.00 |
-| Philosophy | 68.54 | 70.14 | +1.60 |
-| Physics | 70.52 | 74.67 | +4.15 |
-| Psychology | 76.32 | 76.44 | +0.12 |
+| **Overall** | **71.96** | **68.40** | **70.02** |
+| Biology | 84.10 | 81.73 | 81.73 |
+| Business | 74.02 | 67.55 | 71.61 |
+| Chemistry | 75.18 | 70.67 | 74.56 |
+| Computer Science | 75.37 | 72.44 | 73.17 |
+| Economics | 79.86 | 76.90 | 77.84 |
+| Engineering | 50.77 | 49.54 | 49.12 |
+| Health | 74.57 | 71.64 | 73.47 |
+| History | 64.04 | 63.78 | 61.94 |
+| Law | 46.59 | 44.41 | 46.59 |
+| Math | 85.05 | 82.68 | 83.27 |
+| Other | 68.61 | 64.07 | 65.15 |
+| Philosophy | 71.74 | 68.34 | 69.14 |
+| Physics | 78.06 | 69.75 | 74.06 |
+| Psychology | 78.07 | 76.57 | 76.82 |
 
 ### MMMU-Pro
 
@@ -94,13 +94,19 @@ VLM evaluation with lmms-eval:
 
 ```bash
 python benchmarks/benchmark_exaone45.py eval \
-  --models awq flatquant \
+  --models bf16 awq flatquant \
   --awq_model_path LGAI-EXAONE/EXAONE-4.5-33B-AWQ \
   --flatquant_model_paths Hyun9junn/EXAONE-4.5-33B-FlatQuant-W4A16 \
   --flatquant_labels FlatQuant-W4A16 \
   --engine vllm \
   --tasks mmmu_pro --batch_size 8 --max_new_tokens 512 --max_model_len 8192
 ```
+
+| Model | MMMU-Pro |
+| --- | --- |
+| BF16 | standard=17.57 / vision=21.50 |
+| AWQ | standard=17.98 / vision=20.93 |
+| FlatQuant W4A16 | standard=18.90 / vision=20.06 |
 
 ### Latency
 

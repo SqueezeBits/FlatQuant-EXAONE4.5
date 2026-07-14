@@ -53,6 +53,7 @@ def build_manifest() -> dict:
         "tensor_parallel_size": 1,
         "kv_cache_dtype": "fp8",
         "targets": ["qkv_proj", "o_proj", "gate_up_proj", "down_proj"],
+        "representations": ["w4a4"],
     }
 
 

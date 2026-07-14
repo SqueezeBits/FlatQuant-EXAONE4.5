@@ -84,7 +84,7 @@ def aggregate_worker_counters(snapshots: Sequence[dict[str, int]]) -> dict[str, 
             totals[name] = totals.get(name, 0) + int(value)
     if totals.get("w4a4", 0) <= 0:
         raise RuntimeError("W4A4 backend did not dispatch on any vLLM worker")
-    if totals.get("fallback", 0):
+    if any(totals.get(name, 0) for name in ("w4a16_fallback", "bf16_fallback")):
         raise RuntimeError(f"strict W4A4 execution observed fallback: {totals}")
     return totals
 

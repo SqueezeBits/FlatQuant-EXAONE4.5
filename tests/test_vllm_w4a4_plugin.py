@@ -6,6 +6,7 @@ from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from flatquant_w4a4.format import validate_manifest
 from flatquant_vllm_plugin import w4a4_config
 from flatquant_vllm_plugin.w4a4_config import (
+    DispatchPolicy,
     FlatQuantW4A4Config,
     FlatQuantW4A4LinearMethod,
 )
@@ -153,14 +154,62 @@ def test_dispatch_counters_snapshot_is_a_copy():
     counters.increment("w4a4")
     snapshot = counters.snapshot()
     snapshot["w4a4"] = 99
-    assert counters.snapshot() == {"w4a4": 1}
+    assert counters.snapshot() == {
+        "w4a4": 1, "w4a16_fallback": 0, "bf16_fallback": 0
+    }
 
 
 def test_dispatch_counters_can_be_reset_for_worker_rpc_observability():
     counters = DispatchCounters()
     counters.increment("w4a4")
-    assert counters.reset() == {"w4a4": 1}
-    assert counters.snapshot() == {}
+    assert counters.reset() == {
+        "w4a4": 1, "w4a16_fallback": 0, "bf16_fallback": 0
+    }
+    assert counters.snapshot() == {
+        "w4a4": 0, "w4a16_fallback": 0, "bf16_fallback": 0
+    }
+
+
+def test_dispatch_policy_environment_defaults_to_w4a4_only(monkeypatch):
+    monkeypatch.delenv("FLATQUANT_W4A4_MIN_ROWS", raising=False)
+    monkeypatch.delenv("FLATQUANT_W4A4_STRICT", raising=False)
+    assert DispatchPolicy.from_env() == DispatchPolicy(min_w4a4_rows=1, strict=False)
+
+
+def test_dispatch_policy_parses_threshold_and_strict(monkeypatch):
+    monkeypatch.setenv("FLATQUANT_W4A4_MIN_ROWS", "8")
+    monkeypatch.setenv("FLATQUANT_W4A4_STRICT", "1")
+    assert DispatchPolicy.from_env() == DispatchPolicy(min_w4a4_rows=8, strict=True)
+
+
+def test_dispatch_policy_selects_w4a4_at_threshold():
+    policy = DispatchPolicy(min_w4a4_rows=8, strict=False)
+    assert policy.select(8, "layer.0.qkv_proj", ("w4a4", "w4a16")) == "w4a4"
+
+
+def test_dispatch_policy_rejects_unexported_requested_fallback():
+    policy = DispatchPolicy(min_w4a4_rows=8, strict=False)
+    with pytest.raises(RuntimeError, match="fallback representation.*not exported"):
+        policy.select(2, "layer.0.qkv_proj", ("w4a4",))
+
+
+def test_dispatch_policy_strict_error_identifies_prefix_m_and_selection():
+    policy = DispatchPolicy(min_w4a4_rows=8, strict=True)
+    with pytest.raises(
+        RuntimeError, match=r"layer\.0\.down_proj.*M=2.*w4a16_fallback"
+    ):
+        policy.select(2, "layer.0.down_proj", ("w4a4", "w4a16"))
+
+
+def test_dispatch_counter_rpc_schema_distinguishes_all_paths():
+    counters = DispatchCounters()
+    counters.increment("w4a16_fallback")
+    counters.increment("bf16_fallback")
+    assert counters.snapshot() == {
+        "w4a4": 0,
+        "w4a16_fallback": 1,
+        "bf16_fallback": 1,
+    }
 
 
 def test_import_registers_native_custom_operators():

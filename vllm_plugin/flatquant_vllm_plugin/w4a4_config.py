@@ -1,5 +1,7 @@
 """Native packed W4A4 quantization configuration for EXAONE 4.5."""
 
+from dataclasses import dataclass
+import os
 from typing import Any
 
 import torch
@@ -14,6 +16,43 @@ from vllm.model_executor.utils import set_weight_attrs
 
 from .transform import decompose_dim
 from .w4a4_ops import apply_w4a4
+
+
+@dataclass(frozen=True)
+class DispatchPolicy:
+    """Select a declared projection representation by flattened row count."""
+
+    min_w4a4_rows: int
+    strict: bool
+
+    def __post_init__(self):
+        if self.min_w4a4_rows < 1:
+            raise ValueError("FLATQUANT_W4A4_MIN_ROWS must be at least 1")
+
+    @classmethod
+    def from_env(cls):
+        return cls(
+            min_w4a4_rows=int(os.getenv("FLATQUANT_W4A4_MIN_ROWS", "1")),
+            strict=os.getenv("FLATQUANT_W4A4_STRICT", "0") == "1",
+        )
+
+    def select(self, rows: int, prefix: str, representations) -> str:
+        if rows >= self.min_w4a4_rows:
+            return "w4a4"
+        available = tuple(representations)
+        fallback = next((name for name in ("w4a16", "bf16") if name in available), None)
+        selected = f"{fallback}_fallback" if fallback else "unavailable_fallback"
+        if self.strict:
+            raise RuntimeError(
+                f"FlatQuant strict dispatch rejected prefix={prefix}, M={rows}, "
+                f"selected={selected}"
+            )
+        if fallback is None:
+            raise RuntimeError(
+                f"FlatQuant fallback representation not exported for prefix={prefix}, "
+                f"M={rows}, selected={selected}"
+            )
+        return fallback
 
 
 def _whole_tensor_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
@@ -41,8 +80,10 @@ def _parameter(shape, dtype, attrs):
 
 
 class FlatQuantW4A4LinearMethod(LinearMethodBase):
-    def __init__(self, prefix: str):
+    def __init__(self, prefix: str, policy: DispatchPolicy, representations):
         self.prefix = prefix
+        self.policy = policy
+        self.representations = tuple(representations)
 
     def create_weights(
         self,
@@ -109,7 +150,10 @@ class FlatQuantW4A4LinearMethod(LinearMethodBase):
             )
 
     def apply(self, layer, x, bias=None):
-        return apply_w4a4(layer, x, bias)
+        return apply_w4a4(
+            layer, x, bias, prefix=self.prefix, policy=self.policy,
+            representations=self.representations
+        )
 
 
 @register_quantization_config("flatquant_w4a4")
@@ -117,6 +161,14 @@ class FlatQuantW4A4Config(QuantizationConfig):
     def __init__(self, config: dict[str, Any]):
         super().__init__()
         self.config = dict(config)
+        self.policy = DispatchPolicy.from_env()
+        self.representations = tuple(config.get("representations", ("w4a4",)))
+        unsupported = set(self.representations) - {"w4a4"}
+        if unsupported:
+            raise ValueError(
+                "fallback representations are declared but this exporter/runtime has no "
+                f"matching tensor load path: {sorted(unsupported)}"
+            )
 
     @classmethod
     def get_config_filenames(cls):
@@ -142,7 +194,9 @@ class FlatQuantW4A4Config(QuantizationConfig):
             raise NotImplementedError("FlatQuant W4A4 supports TP=1 only")
         suffixes = (".qkv_proj", ".o_proj", ".gate_up_proj", ".down_proj")
         if "language_model.model.layers." in prefix and prefix.endswith(suffixes):
-            return FlatQuantW4A4LinearMethod(prefix)
+            return FlatQuantW4A4LinearMethod(
+                prefix, self.policy, self.representations
+            )
         # Embedding classes also consult this hook and must select their own
         # UnquantizedEmbeddingMethod when the quant config does not target them.
         if hasattr(layer, "num_embeddings") and hasattr(layer, "embedding_dim"):

@@ -146,12 +146,22 @@ def test_compare_logits_records_deterministic_numeric_deltas_and_counters():
         torch.tensor([[0.0, -2.0], [3.0, 7.0]]),
         [4, 8, 9],
         [4, 7, 9],
-        {"w4a4": 12, "fallback": 0},
+        {"w4a4": 12, "w4a16_fallback": 0, "bf16_fallback": 0},
     )
     assert result.mean_abs_error == pytest.approx(1.0)
     assert result.max_abs_error == pytest.approx(2.0)
     assert result.token_agreement == pytest.approx(2 / 3)
-    assert result.fallback_counts == {"w4a4": 12, "fallback": 0}
+    assert result.fallback_counts == {
+        "w4a4": 12, "w4a16_fallback": 0, "bf16_fallback": 0
+    }
+
+
+@pytest.mark.parametrize("name", ["w4a16_fallback", "bf16_fallback"])
+def test_worker_counter_aggregation_rejects_each_fallback(name):
+    from benchmarks.exaone45.vllm_w4a4 import aggregate_worker_counters
+
+    with pytest.raises(RuntimeError, match=name):
+        aggregate_worker_counters([{"w4a4": 1, name: 1}])
 
 
 def test_compare_logits_rejects_mismatched_shapes_and_empty_tokens():

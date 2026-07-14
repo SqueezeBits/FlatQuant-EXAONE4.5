@@ -196,6 +196,31 @@ PPL in an 8 x 2,048-token smoke test (`6.911681770112198`) and byte-identical
 32-token greedy output; all 108 transform shape/config checks stayed within
 `5e-3` relative maximum error against the fp32 reference.
 
+#### W4A4 decode dispatch policy
+
+`FLATQUANT_W4A4_MIN_ROWS` controls the flattened-row threshold (default `1`),
+and `FLATQUANT_W4A4_STRICT=1` rejects a selected fallback with an error that
+identifies the layer prefix, `M`, and selection. Worker-observable counters have
+a stable schema: `w4a4`, `w4a16_fallback`, and `bf16_fallback`.
+
+Current exports explicitly declare `representations: ["w4a4"]` and contain no
+duplicate W4A16 or BF16 projection weights. Consequently, setting a threshold
+above one requests an unavailable fallback and is rejected; it never silently
+dequantizes or fabricates another representation. The config loader likewise
+rejects fallback declarations because this exporter/runtime does not implement
+matching tensors and a load path yet.
+
+An A100-SXM4-80GB microbenchmark used 10 warmups and 30 measured iterations for
+each of M `1, 2, 4, 8, 16, 32, 64, 128`, comparing the same learned transform
+plus native W4A4 (including activation quantize/pack), Marlin W4A16, or BF16
+across all four fused EXAONE 32B projections. Down-projection W4A16 won through
+M=64, and M=128 was the first sampled point where W4A4 won every projection.
+Because 128 is the final requested sample, persistence beyond it was not
+established; this is a sampled crossover, not a claimed stable production
+threshold. The raw measurements are recorded separately in
+`.superpowers/sdd/task-8-a100-crossover.json`; it is not encoded in today's
+W4A4-only artifact, whose safe threshold remains 1.
+
 ## Acknowledgements
 
 This work builds on [FlatQuant](https://github.com/ruikangliu/FlatQuant) and

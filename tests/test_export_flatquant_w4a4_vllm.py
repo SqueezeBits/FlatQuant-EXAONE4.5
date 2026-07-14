@@ -82,6 +82,7 @@ def test_export_fuses_rows_and_writes_native_manifest(tmp_path):
 
     manifest = json.loads((output / "flatquant_w4a4_config.json").read_text())
     validate_manifest(manifest)
+    assert manifest["representations"] == ["w4a4"]
     config = json.loads((output / "config.json").read_text())
     assert config["architectures"] == ["Exaone4_5_ForConditionalGeneration"]
     assert config["quantization_config"] == manifest
@@ -94,6 +95,9 @@ def test_export_fuses_rows_and_writes_native_manifest(tmp_path):
         assert scales.shape == (Q_ROWS + K_ROWS + V_ROWS, 1)
         assert PREFIX + "self_attn.qkv_proj.flatquant_left" in handle.keys()
         assert PREFIX + "self_attn.qkv_proj.activation_clip" in handle.keys()
+        assert not any(
+            "w4a16" in name or "bf16_fallback" in name for name in handle.keys()
+        )
     index = json.loads((output / "model.safetensors.index.json").read_text())
     assert set(index["weight_map"].values()) == {"model-00001-of-00001.safetensors"}
 

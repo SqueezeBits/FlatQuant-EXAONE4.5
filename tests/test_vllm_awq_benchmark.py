@@ -1,7 +1,11 @@
 import math
 from types import SimpleNamespace
 
-from benchmarks.exaone45.vllm_awq import _engine_kwargs, summarize_latency
+from benchmarks.exaone45.vllm_awq import (
+    _engine_kwargs,
+    _nvtx_measurement_range,
+    summarize_latency,
+)
 
 
 def test_summarize_latency_reports_ttft_tpot_and_throughput():
@@ -95,3 +99,35 @@ def test_engine_kwargs_enable_request_metrics():
     kwargs = _engine_kwargs(args)
 
     assert kwargs["disable_log_stats"] is False
+
+
+def test_nvtx_measurement_range_uses_named_cuda_range():
+    calls = []
+
+    class FakeRange:
+        def __enter__(self):
+            calls.append("enter")
+
+        def __exit__(self, *args):
+            calls.append("exit")
+
+    class FakeNvtx:
+        @staticmethod
+        def range(name):
+            calls.append(name)
+            return FakeRange()
+
+    class FakeCuda:
+        nvtx = FakeNvtx()
+
+        @staticmethod
+        def is_available():
+            return True
+
+    class FakeTorch:
+        cuda = FakeCuda()
+
+    with _nvtx_measurement_range(FakeTorch()):
+        calls.append("body")
+
+    assert calls == ["vllm_measurement", "enter", "body", "exit"]

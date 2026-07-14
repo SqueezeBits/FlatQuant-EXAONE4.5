@@ -1,6 +1,7 @@
 """Offline vLLM generation and latency runner for the EXAONE-4.5 AWQ model."""
 
 import argparse
+import contextlib
 import importlib.metadata
 import json
 import statistics
@@ -158,6 +159,14 @@ def _first_token_latency(outputs):
     return statistics.median(values) if values else None
 
 
+def _nvtx_measurement_range(torch_module=None):
+    if torch_module is None:
+        import torch as torch_module
+    if not torch_module.cuda.is_available():
+        return contextlib.nullcontext()
+    return torch_module.cuda.nvtx.range("vllm_measurement")
+
+
 def run_latency(args):
     from vllm import SamplingParams
 
@@ -171,21 +180,24 @@ def run_latency(args):
 
     input_tokens = sum(len(token_ids) for token_ids in llm.get_tokenizer()(prompts).input_ids)
     samples = []
-    for _ in range(args.num_repeats):
-        start = time.perf_counter()
-        outputs = llm.generate(prompts, params, use_tqdm=False)
-        elapsed = time.perf_counter() - start
-        generated_per_request = [len(output.outputs[0].token_ids) for output in outputs]
-        generated = sum(generated_per_request)
-        samples.append(
-            {
-                "first_token_s": _first_token_latency(outputs),
-                "elapsed_s": elapsed,
-                "input_tokens": input_tokens,
-                "output_tokens": generated,
-                "output_tokens_per_request": max(generated_per_request, default=0),
-            }
-        )
+    with _nvtx_measurement_range():
+        for _ in range(args.num_repeats):
+            start = time.perf_counter()
+            outputs = llm.generate(prompts, params, use_tqdm=False)
+            elapsed = time.perf_counter() - start
+            generated_per_request = [
+                len(output.outputs[0].token_ids) for output in outputs
+            ]
+            generated = sum(generated_per_request)
+            samples.append(
+                {
+                    "first_token_s": _first_token_latency(outputs),
+                    "elapsed_s": elapsed,
+                    "input_tokens": input_tokens,
+                    "output_tokens": generated,
+                    "output_tokens_per_request": max(generated_per_request, default=0),
+                }
+            )
 
     result = {
         "backend": "vllm",

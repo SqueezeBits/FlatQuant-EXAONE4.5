@@ -68,10 +68,15 @@ struct FusedGemm {
       cutlass::multiplies, float, float, cutlass::FloatRoundStyle::round_to_nearest>;
   using ScaleRows = cutlass::epilogue::threadblock::Sm80EVT<Multiply, Accum, XScale>;
   using ScaleCols = cutlass::epilogue::threadblock::Sm80EVT<Multiply, ScaleRows, WScale>;
+  using Bias = cutlass::epilogue::threadblock::VisitorRowBroadcast<
+      ThreadMap, ElementC, cute::Stride<cute::_0, cute::_1, int64_t>>;
+  using Add = cutlass::epilogue::threadblock::VisitorCompute<
+      cutlass::plus, float, float, cutlass::FloatRoundStyle::round_to_nearest>;
+  using AddBias = cutlass::epilogue::threadblock::Sm80EVT<Add, ScaleCols, Bias>;
   using Store = cutlass::epilogue::threadblock::VisitorAuxStore<
       ThreadMap, ElementC, cutlass::FloatRoundStyle::round_to_nearest,
       cute::Stride<int64_t, cute::_1, int64_t>>;
-  using Epilogue = cutlass::epilogue::threadblock::Sm80EVT<Store, ScaleCols>;
+  using Epilogue = cutlass::epilogue::threadblock::Sm80EVT<Store, AddBias>;
   using Kernel = typename cutlass::gemm::kernel::DefaultGemmWithVisitor<
       ElementA, cutlass::layout::RowMajor, cutlass::ComplexTransform::kNone, 32,
       ElementB, cutlass::layout::ColumnMajor, cutlass::ComplexTransform::kNone, 32,
@@ -96,10 +101,10 @@ int row_bucket(int64_t m) {
 
 int candidate_for(int64_t m, int64_t n, int64_t k) {
   int b = row_bucket(m);
-  if (n == 5120 && k == 5120) { static constexpr int t[] = {1, 0, 0, 0, 2}; return t[b]; }
-  if (n == 1024 && k == 5120) { static constexpr int t[] = {0, 1, 0, 1, 0}; return t[b]; }
-  if (n == 27392 && k == 5120) { static constexpr int t[] = {0, 1, 2, 2, 2}; return t[b]; }
-  if (n == 5120 && k == 27392) { static constexpr int t[] = {0, 0, 0, 2, 2}; return t[b]; }
+  if (n == 5120 && k == 5120) { static constexpr int t[] = {0, 0, 0, 0, 1}; return t[b]; }
+  if (n == 1024 && k == 5120) { static constexpr int t[] = {0, 0, 0, 0, 0}; return t[b]; }
+  if (n == 27392 && k == 5120) { static constexpr int t[] = {0, 0, 1, 1, 1}; return t[b]; }
+  if (n == 5120 && k == 27392) { static constexpr int t[] = {0, 0, 0, 1, 1}; return t[b]; }
   return b < 2 ? 0 : b == 2 ? 1 : 2;
 }
 
@@ -115,12 +120,15 @@ template <class Config>
 cutlass::Status launch_fused(
     int m, int n, int k, const torch::Tensor& packed_x,
     const torch::Tensor& packed_w, const torch::Tensor& x_scale,
-    const torch::Tensor& w_scale, torch::Tensor& output) {
+    const torch::Tensor& w_scale, const c10::optional<torch::Tensor>& bias,
+    torch::Tensor& output) {
   using EVT = typename Config::Epilogue;
-  typename EVT::Arguments epilogue{{{{},
+  const ElementC* bias_ptr = bias ? reinterpret_cast<const ElementC*>(bias->data_ptr()) : nullptr;
+  typename EVT::Arguments epilogue{{{{{},
       {x_scale.data_ptr<float>(), 0.0f, {cute::_1{}, cute::_0{}, int64_t(m)}}, {}},
       {reinterpret_cast<const cutlass::half_t*>(w_scale.data_ptr()), cutlass::half_t(0),
        {cute::_0{}, cute::_1{}, int64_t(n)}}, {}},
+      {bias_ptr, ElementC(0), {cute::_0{}, cute::_1{}, int64_t(n)}}, {}},
       {reinterpret_cast<ElementC*>(output.data_ptr()), {int64_t(n), cute::_1{}, int64_t(m) * n}}};
   typename Config::Device::Arguments args(
       cutlass::gemm::GemmUniversalMode::kGemm, {m, n, k}, 1, epilogue,
@@ -163,10 +171,17 @@ std::string w4a4_kernel_name(int64_t m, int64_t n, int64_t k) {
   return kernel_name(m, n, k);
 }
 
+std::string w4a4_candidate_name(int64_t candidate) {
+  TORCH_CHECK(candidate >= 0 && candidate < 3, "candidate must be 0, 1, or 2");
+  static constexpr const char* names[] = {"small", "medium", "large"};
+  return names[candidate];
+}
+
 torch::Tensor w4a4_linear_cuda_candidate(
     const torch::Tensor& packed_x, const torch::Tensor& packed_w,
     const torch::Tensor& x_scale, const torch::Tensor& w_scale,
-    c10::ScalarType output_dtype, int64_t candidate) {
+    c10::ScalarType output_dtype, int64_t candidate,
+    const c10::optional<torch::Tensor>& bias) {
   TORCH_CHECK(packed_x.is_cuda() && packed_w.is_cuda() && x_scale.is_cuda() && w_scale.is_cuda(),
               "all W4A4 tensors must be CUDA tensors");
   TORCH_CHECK(packed_x.get_device() == packed_w.get_device() && packed_x.get_device() == x_scale.get_device() &&
@@ -186,6 +201,12 @@ torch::Tensor w4a4_linear_cuda_candidate(
   TORCH_CHECK(x_scale.sizes() == torch::IntArrayRef({packed_x.size(0), 1}), "x_scale shape mismatch");
   TORCH_CHECK(w_scale.sizes() == torch::IntArrayRef({packed_w.size(0), 1}), "w_scale shape mismatch");
   TORCH_CHECK(output_dtype == torch::kBFloat16, "output_dtype must be BF16");
+  if (bias) {
+    TORCH_CHECK(bias->is_cuda() && bias->get_device() == packed_x.get_device(), "bias must be on the same CUDA device");
+    TORCH_CHECK(bias->scalar_type() == torch::kBFloat16 && bias->is_contiguous() &&
+                bias->dim() == 1 && bias->size(0) == packed_w.size(0),
+                "bias must have shape (N,), dtype BF16, and be contiguous");
+  }
   TORCH_CHECK(candidate >= -1 && candidate < 3, "candidate must be -1, 0, 1, or 2");
   int64_t m = packed_x.size(0), n = packed_w.size(0), k = packed_x.size(1) * 2;
   auto output = torch::empty({m, n}, packed_x.options().dtype(torch::kBFloat16));
@@ -193,9 +214,9 @@ torch::Tensor w4a4_linear_cuda_candidate(
   cutlass::Status status;
   int selected = candidate < 0 ? candidate_for(m, n, k) : candidate;
   switch (selected) {
-    case 0: case 1: status = launch_fused<KernelSmall>(m, n, k, packed_x, packed_w, x_scale, w_scale, output); break;
-    case 2: status = launch_fused<KernelMedium>(m, n, k, packed_x, packed_w, x_scale, w_scale, output); break;
-    default: status = launch_fused<KernelLarge>(m, n, k, packed_x, packed_w, x_scale, w_scale, output); break;
+    case 0: status = launch_fused<KernelSmall>(m, n, k, packed_x, packed_w, x_scale, w_scale, bias, output); break;
+    case 1: status = launch_fused<KernelMedium>(m, n, k, packed_x, packed_w, x_scale, w_scale, bias, output); break;
+    case 2: status = launch_fused<KernelLarge>(m, n, k, packed_x, packed_w, x_scale, w_scale, bias, output); break;
   }
   TORCH_CHECK(status == cutlass::Status::kSuccess,
               "CUTLASS W4A4 fused GEMM failed: ", cutlassGetStatusString(status));
@@ -205,7 +226,7 @@ torch::Tensor w4a4_linear_cuda_candidate(
 torch::Tensor w4a4_linear_cuda(
     const torch::Tensor& packed_x, const torch::Tensor& packed_w,
     const torch::Tensor& x_scale, const torch::Tensor& w_scale,
-    c10::ScalarType output_dtype) {
+    c10::ScalarType output_dtype, const c10::optional<torch::Tensor>& bias) {
   return w4a4_linear_cuda_candidate(
-      packed_x, packed_w, x_scale, w_scale, output_dtype, -1);
+      packed_x, packed_w, x_scale, w_scale, output_dtype, -1, bias);
 }

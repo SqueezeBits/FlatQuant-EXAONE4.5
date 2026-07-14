@@ -19,7 +19,7 @@ std::tuple<torch::Tensor, torch::Tensor> quantize_pack_i4_meta(
 torch::Tensor w4a4_linear_meta(
     const torch::Tensor& packed_x, const torch::Tensor& packed_w,
     const torch::Tensor& x_scale, const torch::Tensor& w_scale,
-    c10::ScalarType output_dtype) {
+    c10::ScalarType output_dtype, const c10::optional<torch::Tensor>& bias) {
   TORCH_CHECK(packed_x.dim() == 2 && packed_w.dim() == 2,
               "packed_x and packed_w must be 2D tensors");
   TORCH_CHECK(packed_x.is_contiguous() && packed_w.is_contiguous() &&
@@ -37,6 +37,9 @@ torch::Tensor w4a4_linear_meta(
   TORCH_CHECK(w_scale.dim() == 2 && w_scale.size(0) == packed_w.size(0) && w_scale.size(1) == 1,
               "w_scale shape mismatch");
   TORCH_CHECK(output_dtype == torch::kBFloat16, "output_dtype must be BF16");
+  if (bias) TORCH_CHECK(bias->scalar_type() == torch::kBFloat16 && bias->is_contiguous() &&
+                        bias->dim() == 1 && bias->size(0) == packed_w.size(0),
+                        "bias must have shape (N,), dtype BF16, and be contiguous");
   return torch::empty(
       {packed_x.size(0), packed_w.size(0)}, packed_x.options().dtype(output_dtype));
 }
@@ -45,9 +48,10 @@ torch::Tensor w4a4_linear_meta(
 
 TORCH_LIBRARY(flatquant, m) {
   m.def("quantize_pack_i4(Tensor x, Tensor clip) -> (Tensor, Tensor)");
-  m.def("w4a4_linear(Tensor packed_x, Tensor packed_w, Tensor x_scale, Tensor w_scale, ScalarType output_dtype) -> Tensor");
+  m.def("w4a4_linear(Tensor packed_x, Tensor packed_w, Tensor x_scale, Tensor w_scale, ScalarType output_dtype, Tensor? bias=None) -> Tensor");
   m.def("w4a4_kernel_name(int M, int N, int K) -> str", &w4a4_kernel_name);
-  m.def("_w4a4_linear_candidate(Tensor packed_x, Tensor packed_w, Tensor x_scale, Tensor w_scale, ScalarType output_dtype, int candidate) -> Tensor");
+  m.def("_w4a4_candidate_name(int candidate) -> str", &w4a4_candidate_name);
+  m.def("_w4a4_linear_candidate(Tensor packed_x, Tensor packed_w, Tensor x_scale, Tensor w_scale, ScalarType output_dtype, int candidate, Tensor? bias=None) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(flatquant, CUDA, m) {

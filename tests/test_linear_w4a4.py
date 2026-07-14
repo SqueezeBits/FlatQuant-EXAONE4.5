@@ -104,6 +104,51 @@ def test_w4a4_candidate_selector_parity_and_rejection():
     with pytest.raises(RuntimeError, match="candidate"):
         torch.ops.flatquant._w4a4_linear_candidate(
             px, pw, xs, ws, torch.bfloat16, 3)
+    assert [torch.ops.flatquant._w4a4_candidate_name(i) for i in range(3)] == [
+        "small", "medium", "large"]
+
+
+def test_w4a4_kernel_table_boundaries_and_fallback():
+    tables = {
+        (5120, 5120): [0, 0, 0, 0, 1],
+        (1024, 5120): [0, 0, 0, 0, 0],
+        (27392, 5120): [0, 0, 1, 1, 1],
+        (5120, 27392): [0, 0, 0, 1, 1],
+    }
+    names = [
+        "sm80_64x128x128_w32x64x128_s3",
+        "sm80_128x128x128_w64x64x128_s3",
+        "sm80_128x256x128_w64x64x128_s3",
+    ]
+    checks = [(31, 0), (32, 1), (127, 1), (128, 2), (511, 2),
+              (512, 3), (2047, 3), (2048, 4)]
+    for (n, k), table in tables.items():
+        for m, bucket in checks:
+            assert torch.ops.flatquant.w4a4_kernel_name(m, n, k) == names[table[bucket]]
+    fallback = [0, 0, 1, 2, 2]
+    for m, bucket in checks:
+        assert torch.ops.flatquant.w4a4_kernel_name(m, 768, 512) == names[fallback[bucket]]
+
+
+@CUDA
+def test_w4a4_bias_is_fused_and_numerically_correct():
+    m, n, k = 512, 768, 512
+    px = torch.randint(0, 256, (m, k // 2), device="cuda", dtype=torch.uint8)
+    pw = torch.randint(0, 256, (n, k // 2), device="cuda", dtype=torch.uint8)
+    xs = torch.rand(m, 1, device="cuda") * 0.02
+    ws = torch.rand(n, 1, device="cuda", dtype=torch.float16) * 0.02
+    bias = torch.randn(n, device="cuda", dtype=torch.bfloat16)
+    base = torch.ops.flatquant.w4a4_linear(px, pw, xs, ws, torch.bfloat16)
+    expected = (base.float() + bias.float()).to(torch.bfloat16)
+    torch.cuda.synchronize(); torch.cuda.reset_peak_memory_stats()
+    baseline = torch.cuda.memory_allocated()
+    actual = torch.ops.flatquant.w4a4_linear(px, pw, xs, ws, torch.bfloat16, bias)
+    torch.cuda.synchronize()
+    assert torch.cuda.max_memory_allocated() - baseline == actual.numel() * actual.element_size()
+    # Fused bias is added to FP32-scaled accumulators before the single BF16
+    # rounding, whereas ``expected`` necessarily rounds the unbiased output
+    # first.  Bound the resulting one-ULP difference.
+    torch.testing.assert_close(actual.float(), expected.float(), rtol=1e-2, atol=2e-2)
 
 
 @CUDA

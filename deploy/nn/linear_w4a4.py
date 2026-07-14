@@ -38,9 +38,9 @@ def w4a4_linear(
     _require_sm80(packed_x.device)
     output = torch.ops.flatquant.w4a4_linear(
         packed_x.contiguous(), packed_w.contiguous(), x_scale.contiguous(),
-        w_scale.contiguous(), output_dtype
+        w_scale.contiguous(), output_dtype, bias
     )
-    return output if bias is None else output + bias
+    return output
 
 
 class LinearW4A4(torch.nn.Module):

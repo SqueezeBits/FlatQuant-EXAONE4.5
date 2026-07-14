@@ -55,3 +55,24 @@ The measured 4-by-5 winner table is encoded directly in `candidate_for`; unknown
 aligned shapes retain a deterministic bucket fallback. The private
 `_w4a4_linear_candidate` debug op validates candidate IDs and uses the identical
 numeric path; production `w4a4_linear` ABI remains unchanged and BF16-only.
+
+## Review correction
+
+The first tuning results are invalid: the candidate switch incorrectly routed
+IDs 0 and 1 to Small, ID 2 to Medium, and the validated default arm to Large.
+The corrected exhaustive switch maps 0=Small, 1=Medium, 2=Large. Observable
+candidate-name and full bucket-boundary tests now prove dispatch identity.
+
+Corrected tuning gives each candidate five private warmups, rotates timing order
+deterministically per shape, and takes 30 samples across all 3x4x5 combinations.
+Corrected winners are: `(1024,5120)` all Small; `(5120,5120)`
+Small/Small/Small/Small/Medium; `(27392,5120)`
+Small/Small/Medium/Medium/Medium; `(5120,27392)`
+Small/Small/Small/Medium/Medium. Corrected raw records replace
+`outputs/w4a4-gemm-a100-candidates.json`.
+
+Optional contiguous BF16 `(N,)` bias is a CUTLASS row-broadcast visitor and FP32
+add before the single BF16 store. The schema accepts `Tensor? bias` with a
+default, Meta and CUDA validate it, and the high-level module no longer performs
+a separate `output + bias`. Bias memory verification observes exactly one BF16
+output allocation.

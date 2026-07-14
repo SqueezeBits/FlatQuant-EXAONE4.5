@@ -68,7 +68,14 @@ def main():
             max_error = (output[0].float() - ref).abs().max().item()
             median = percentile(times, 0.5)
             candidate_medians = []
-            for candidate in range(3):
+            candidate_medians = [None, None, None]
+            offset = (m + n + k) % 3
+            candidate_order = [(offset + i) % 3 for i in range(3)]
+            for candidate in candidate_order:
+                for _ in range(args.warmup):
+                    torch.ops.flatquant._w4a4_linear_candidate(
+                        packed_x, packed_w, xscale, wscale,
+                        torch.bfloat16, candidate)
                 candidate_times = []
                 for _ in range(args.iterations):
                     start = torch.cuda.Event(enable_timing=True)
@@ -79,7 +86,7 @@ def main():
                         torch.bfloat16, candidate)
                     end.record(); end.synchronize()
                     candidate_times.append(start.elapsed_time(end))
-                candidate_medians.append(percentile(candidate_times, 0.5))
+                candidate_medians[candidate] = percentile(candidate_times, 0.5)
             records.append({
                 "M": m, "N": n, "K": k,
                 "kernel": torch.ops.flatquant.w4a4_kernel_name(m, n, k),
@@ -87,6 +94,7 @@ def main():
                 "effective_tops": (2.0 * m * n * k) / (median * 1e9),
                 "max_error": max_error,
                 "candidate_median_ms": candidate_medians,
+                "candidate_timing_order": candidate_order,
                 "measured_winner": min(
                     range(3), key=candidate_medians.__getitem__),
             })

@@ -16,6 +16,7 @@ def valid_manifest():
         "tensor_parallel_size": 1,
         "kv_cache_dtype": "fp8",
         "targets": ["qkv_proj", "o_proj", "gate_up_proj", "down_proj"],
+        "representations": ["w4a4"],
     }
 
 
@@ -58,4 +59,18 @@ def test_manifest_rejects_unsupported_contract(key, value):
     manifest = valid_manifest()
     manifest[key] = value
     with pytest.raises(ValueError, match=key):
+        validate_manifest(manifest)
+
+
+@pytest.mark.parametrize(
+    "representations",
+    [None, [], ["w4a4", "w4a4"], ["w4a4", "w4a16"], ["bf16"]],
+)
+def test_manifest_requires_exact_w4a4_representation(representations):
+    manifest = valid_manifest()
+    if representations is None:
+        del manifest["representations"]
+    else:
+        manifest["representations"] = representations
+    with pytest.raises(ValueError, match="representations"):
         validate_manifest(manifest)

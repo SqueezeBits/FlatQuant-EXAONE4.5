@@ -210,7 +210,9 @@ dequantizes or fabricates another representation. The config loader likewise
 rejects fallback declarations because this exporter/runtime does not implement
 matching tensors and a load path yet.
 
-An A100-SXM4-80GB microbenchmark used 10 warmups and 30 measured iterations for
+An A100-SXM4-80GB microbenchmark loaded the actual layer-0 learned transforms
+from the cached `Hyun9junn/EXAONE-4.5-33B-FlatQuant-W4A16` snapshot
+`61571ec565670a5e8304b13473ba33793e61204d`. It used 10 warmups and 30 measured iterations for
 each of M `1, 2, 4, 8, 16, 32, 64, 128`, comparing the same learned transform
 plus native W4A4 (including activation quantize/pack), Marlin W4A16, or BF16
 across all four fused EXAONE 32B projections. Down-projection W4A16 won through

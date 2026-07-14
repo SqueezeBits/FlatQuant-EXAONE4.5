@@ -31,9 +31,21 @@ class DispatchPolicy:
 
     @classmethod
     def from_env(cls):
+        min_rows_text = os.getenv("FLATQUANT_W4A4_MIN_ROWS", "1")
+        try:
+            min_rows = int(min_rows_text)
+        except ValueError as error:
+            raise ValueError(
+                f"FLATQUANT_W4A4_MIN_ROWS must be an integer, got {min_rows_text!r}"
+            ) from error
+        strict_text = os.getenv("FLATQUANT_W4A4_STRICT", "0")
+        if strict_text not in {"0", "1"}:
+            raise ValueError(
+                f"FLATQUANT_W4A4_STRICT must be '0' or '1', got {strict_text!r}"
+            )
         return cls(
-            min_w4a4_rows=int(os.getenv("FLATQUANT_W4A4_MIN_ROWS", "1")),
-            strict=os.getenv("FLATQUANT_W4A4_STRICT", "0") == "1",
+            min_w4a4_rows=min_rows,
+            strict=strict_text == "1",
         )
 
     def select(self, rows: int, prefix: str, representations) -> str:
@@ -162,12 +174,11 @@ class FlatQuantW4A4Config(QuantizationConfig):
         super().__init__()
         self.config = dict(config)
         self.policy = DispatchPolicy.from_env()
-        self.representations = tuple(config.get("representations", ("w4a4",)))
-        unsupported = set(self.representations) - {"w4a4"}
-        if unsupported:
+        self.representations = tuple(config["representations"])
+        if self.representations != ("w4a4",):
             raise ValueError(
-                "fallback representations are declared but this exporter/runtime has no "
-                f"matching tensor load path: {sorted(unsupported)}"
+                "representations must be exactly ['w4a4']; fallback representations "
+                "have no matching tensor load path"
             )
 
     @classmethod

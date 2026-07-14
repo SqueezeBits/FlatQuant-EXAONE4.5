@@ -33,6 +33,7 @@ def manifest():
         "tensor_parallel_size": 1,
         "kv_cache_dtype": "fp8",
         "targets": ["qkv_proj", "o_proj", "gate_up_proj", "down_proj"],
+        "representations": ["w4a4"],
     }
     validate_manifest(value)
     return value
@@ -180,6 +181,20 @@ def test_dispatch_policy_parses_threshold_and_strict(monkeypatch):
     monkeypatch.setenv("FLATQUANT_W4A4_MIN_ROWS", "8")
     monkeypatch.setenv("FLATQUANT_W4A4_STRICT", "1")
     assert DispatchPolicy.from_env() == DispatchPolicy(min_w4a4_rows=8, strict=True)
+
+
+@pytest.mark.parametrize("value", ["true", "2", "", "yes"])
+def test_dispatch_policy_rejects_invalid_strict(monkeypatch, value):
+    monkeypatch.setenv("FLATQUANT_W4A4_STRICT", value)
+    with pytest.raises(ValueError, match="FLATQUANT_W4A4_STRICT"):
+        DispatchPolicy.from_env()
+
+
+@pytest.mark.parametrize("value", ["not-an-int", "0", "-2"])
+def test_dispatch_policy_rejects_invalid_min_rows(monkeypatch, value):
+    monkeypatch.setenv("FLATQUANT_W4A4_MIN_ROWS", value)
+    with pytest.raises(ValueError, match="FLATQUANT_W4A4_MIN_ROWS"):
+        DispatchPolicy.from_env()
 
 
 def test_dispatch_policy_selects_w4a4_at_threshold():

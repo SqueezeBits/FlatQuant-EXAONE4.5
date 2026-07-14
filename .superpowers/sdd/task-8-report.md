@@ -69,3 +69,35 @@ the parent requirement explicitly mandates policy rejection when no truthful
 exporter/runtime dual representation exists. The review also prompted inclusion
 of the learned transform in every microbenchmark path and a clear limitation
 that M=128 is the final sample, not evidence of persistence beyond it.
+
+## Review follow-up
+
+- `validate_manifest` and runtime config now require
+  `representations == ["w4a4"]`; missing, empty, duplicate, W4A16, and BF16
+  declarations are rejected.
+- `FLATQUANT_W4A4_STRICT` now accepts only literal `0` or `1`.
+  `FLATQUANT_W4A4_MIN_ROWS` gives a named error for non-integers and rejects
+  zero/negative values.
+- The benchmark now accepts `--model` and `--transform-checkpoint`, resolves a
+  Hugging Face cache root through `refs/main`, reads the safetensors index, and
+  requires exact exported layer-0 tensor names for QKV, O, gate/up, and down.
+  Missing tensors fail closed; there is no identity fallback.
+- Raw JSON was regenerated from
+  `/workspace/.hf_home/hub/models--Hyun9junn--EXAONE-4.5-33B-FlatQuant-W4A16/snapshots/61571ec565670a5e8304b13473ba33793e61204d`.
+  With the real learned transform applied equally to every path, QKV, O, and
+  gate/up selected W4A4 at every sampled M. Down selected W4A16 at M=1 through
+  64 and W4A4 at M=128. Therefore M=128 remains the first sampled all-projection
+  W4A4 win, without a stability claim beyond the requested range.
+
+Follow-up verification:
+
+```text
+pytest -q tests/test_w4a4_format.py tests/test_w4a4_dispatch_benchmark.py tests/test_export_flatquant_w4a4_vllm.py
+21 passed
+
+FLATQUANT_W4A4_STRICT=1 pytest -q tests/test_vllm_w4a4_plugin.py tests/test_exaone45_w4a4_logits.py
+40 passed
+
+FLATQUANT_W4A4_STRICT=0 pytest -q tests/test_vllm_w4a4_plugin.py -k fallback
+1 passed, 30 deselected
+```

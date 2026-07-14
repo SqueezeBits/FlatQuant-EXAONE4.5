@@ -13,6 +13,7 @@ def validate_manifest(config: dict) -> None:
         "tensor_parallel_size": 1,
         "kv_cache_dtype": "fp8",
         "targets": list(TARGET_PROJECTIONS),
+        "representations": ["w4a4"],
     }
     for key, value in expected.items():
         if config.get(key) != value:

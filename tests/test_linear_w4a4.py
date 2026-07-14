@@ -105,3 +105,91 @@ def test_w4a4_linear_rejects_wrong_scale_shapes_before_dispatch():
             torch.empty(2),
             torch.empty(8, 1),
         )
+
+
+def test_direct_quantize_rejects_cpu_before_cuda_runtime_query():
+    with pytest.raises(RuntimeError, match="CUDA"):
+        torch.ops.flatquant.quantize_pack_i4(
+            torch.zeros(1, 64, dtype=torch.bfloat16), torch.ones(1, dtype=torch.float16)
+        )
+
+
+@CUDA
+def test_direct_quantize_rejects_noncontiguous_input():
+    x = torch.zeros(64, 2, device="cuda", dtype=torch.bfloat16).t()
+    assert not x.is_contiguous()
+    with pytest.raises(RuntimeError, match="contiguous"):
+        torch.ops.flatquant.quantize_pack_i4(
+            x, torch.ones(1, device="cuda", dtype=torch.float16)
+        )
+
+
+@CUDA
+def test_direct_linear_rejects_noncontiguous_and_mixed_device_inputs():
+    packed_x = torch.zeros(2, 64, device="cuda", dtype=torch.uint8)[:, ::2]
+    packed_w = torch.zeros(8, 32, device="cuda", dtype=torch.uint8)
+    xscale = torch.ones(2, 1, device="cuda")
+    wscale = torch.ones(8, 1, device="cuda", dtype=torch.float16)
+    assert not packed_x.is_contiguous()
+    with pytest.raises(RuntimeError, match="contiguous"):
+        torch.ops.flatquant.w4a4_linear(
+            packed_x, packed_w, xscale, wscale, torch.bfloat16
+        )
+    with pytest.raises(RuntimeError, match="CUDA|device"):
+        torch.ops.flatquant.w4a4_linear(
+            packed_x.contiguous(), packed_w.cpu(), xscale, wscale, torch.bfloat16
+        )
+
+
+@pytest.mark.parametrize(
+    "x,clip,match",
+    [
+        (torch.empty(1, 64, device="meta", dtype=torch.float16),
+         torch.empty(1, device="meta", dtype=torch.float16), "BF16"),
+        (torch.empty(1, 64, device="meta", dtype=torch.bfloat16),
+         torch.empty(2, device="meta", dtype=torch.float16), "clip"),
+        (torch.empty(1, 66, device="meta", dtype=torch.bfloat16),
+         torch.empty(1, device="meta", dtype=torch.float16), "K % 64"),
+        (torch.empty(64, 2, device="meta", dtype=torch.bfloat16).t(),
+         torch.empty(1, device="meta", dtype=torch.float16), "contiguous"),
+    ],
+)
+def test_quantize_meta_rejection_parity(x, clip, match):
+    with pytest.raises(RuntimeError, match=match):
+        torch.ops.flatquant.quantize_pack_i4(x, clip)
+
+
+@pytest.mark.parametrize(
+    "packed_x,packed_w,xscale,wscale,dtype,match",
+    [
+        (torch.empty(2, 32, device="meta", dtype=torch.int8),
+         torch.empty(8, 32, device="meta", dtype=torch.uint8),
+         torch.empty(2, 1, device="meta"), torch.empty(8, 1, device="meta", dtype=torch.float16),
+         torch.bfloat16, "uint8"),
+        (torch.empty(2, 33, device="meta", dtype=torch.uint8),
+         torch.empty(8, 33, device="meta", dtype=torch.uint8),
+         torch.empty(2, 1, device="meta"), torch.empty(8, 1, device="meta", dtype=torch.float16),
+         torch.bfloat16, "K % 64"),
+        (torch.empty(2, 32, device="meta", dtype=torch.uint8),
+         torch.empty(9, 32, device="meta", dtype=torch.uint8),
+         torch.empty(2, 1, device="meta"), torch.empty(9, 1, device="meta", dtype=torch.float16),
+         torch.bfloat16, "N % 8"),
+        (torch.empty(2, 32, device="meta", dtype=torch.uint8),
+         torch.empty(8, 32, device="meta", dtype=torch.uint8),
+         torch.empty(2, 1, device="meta"), torch.empty(8, 1, device="meta", dtype=torch.float16),
+         torch.float32, "output_dtype"),
+    ],
+)
+def test_linear_meta_rejection_parity(packed_x, packed_w, xscale, wscale, dtype, match):
+    with pytest.raises(RuntimeError, match=match):
+        torch.ops.flatquant.w4a4_linear(packed_x, packed_w, xscale, wscale, dtype)
+
+
+@CUDA
+def test_empty_rows_return_empty_without_launch():
+    layer = LinearW4A4(64, 8).cuda()
+    layer.load_packed_weight(
+        torch.zeros(8, 32, dtype=torch.uint8), torch.ones(8, 1), "cuda"
+    )
+    output = layer(torch.empty(0, 64, device="cuda", dtype=torch.bfloat16))
+    assert output.shape == (0, 8)

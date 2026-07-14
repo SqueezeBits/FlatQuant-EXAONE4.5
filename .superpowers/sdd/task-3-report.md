@@ -84,3 +84,45 @@ division for activation quantization preserved ties-to-even behavior. The origin
   permits a temporary adjustment.
 - The root setup arch helper currently builds multiple supported architectures despite
   `TORCH_CUDA_ARCH_LIST=8.0`; the new operator rejects non-SM80 at runtime as required.
+
+## Review-fix cycle
+
+Review requested direct-op device safety, CUDA/Meta validation parity, and defined
+zero-row behavior.
+
+RED command:
+
+```bash
+/venv/main/bin/python -m pytest -q tests/test_linear_w4a4.py
+```
+
+Result: `7 failed, 15 passed`. Six failures were missing Meta dtype/shape/alignment
+rejections; the seventh was an empty-M quantization launch returning
+`cudaErrorInvalidValue`. Direct CPU and noncontiguous inputs already rejected.
+
+Changes:
+
+- Validate primary CUDA input before querying device capability or current stream.
+- Guard the primary input device before SM80 checks, allocations, and launches.
+- Require every CUDA operand to be CUDA, contiguous, and on the guarded device.
+- Mirror all symbolically checkable dtype, rank, shape, alignment, output-dtype,
+  and contiguity validation in Meta implementations.
+- Return correctly shaped empty tensors for M=0 without launching CUDA/CUTLASS.
+- Add direct-op CPU, mixed-device, noncontiguous, Meta parity, and empty-M tests.
+
+The first incremental build exposed an implementation typo (unnamed Meta scale
+parameters); after naming them, the build completed and the initial GREEN was
+`23 passed in 2.23s`.
+
+Final build/GREEN command:
+
+```bash
+source /venv/main/bin/activate
+MAX_JOBS=2 python setup.py build_ext --inplace \
+  >/tmp/task3-review-final-build.log 2>&1 \
+  && /venv/main/bin/python -m pytest -q tests/test_linear_w4a4.py \
+  && git diff --check
+```
+
+Result: build exited zero, `24 passed in 2.24s`, and `git diff --check` exited zero.
+No temporary vendor source change was used or left behind in this review cycle.

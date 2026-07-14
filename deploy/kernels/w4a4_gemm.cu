@@ -58,15 +58,18 @@ void check_sm80() {
 
 std::tuple<torch::Tensor, torch::Tensor> quantize_pack_i4_cuda(
     const torch::Tensor& x, const torch::Tensor& clip) {
-  check_sm80();
   TORCH_CHECK(x.is_cuda() && clip.is_cuda(), "x and clip must be CUDA tensors");
+  TORCH_CHECK(x.get_device() == clip.get_device(), "x and clip must be on the same CUDA device");
+  c10::cuda::CUDAGuard guard(x.device());
+  check_sm80();
   TORCH_CHECK(x.scalar_type() == torch::kBFloat16, "W4A4 activation must be BF16");
-  TORCH_CHECK(clip.scalar_type() == torch::kFloat16 && clip.numel() == 1,
-              "clip must be a scalar FP16 tensor");
+  TORCH_CHECK(clip.scalar_type() == torch::kFloat16 && clip.dim() == 1 && clip.size(0) == 1,
+              "clip must have shape (1,) and dtype FP16");
   TORCH_CHECK(x.dim() == 2 && x.size(1) % 64 == 0, "W4A4 requires 2D x and K % 64 == 0");
   TORCH_CHECK(x.is_contiguous() && clip.is_contiguous(), "inputs must be contiguous");
   auto packed = torch::empty({x.size(0), x.size(1) / 2}, x.options().dtype(torch::kUInt8));
   auto scales = torch::empty({x.size(0), 1}, x.options().dtype(torch::kFloat32));
+  if (x.size(0) == 0) return {packed, scales};
   quantize_pack_kernel<<<x.size(0), 256, 0, at::cuda::getCurrentCUDAStream()>>>(
       reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()), packed.data_ptr<uint8_t>(),
       scales.data_ptr<float>(), x.size(0), x.size(1),
@@ -79,7 +82,17 @@ torch::Tensor w4a4_linear_cuda(
     const torch::Tensor& packed_x, const torch::Tensor& packed_w,
     const torch::Tensor& x_scale, const torch::Tensor& w_scale,
     c10::ScalarType output_dtype) {
+  TORCH_CHECK(packed_x.is_cuda() && packed_w.is_cuda() && x_scale.is_cuda() && w_scale.is_cuda(),
+              "all W4A4 tensors must be CUDA tensors");
+  TORCH_CHECK(packed_x.get_device() == packed_w.get_device() &&
+              packed_x.get_device() == x_scale.get_device() &&
+              packed_x.get_device() == w_scale.get_device(),
+              "all W4A4 tensors must be on the same CUDA device");
+  c10::cuda::CUDAGuard guard(packed_x.device());
   check_sm80();
+  TORCH_CHECK(packed_x.is_contiguous() && packed_w.is_contiguous() &&
+              x_scale.is_contiguous() && w_scale.is_contiguous(),
+              "all W4A4 tensors must be contiguous");
   TORCH_CHECK(packed_x.scalar_type() == torch::kUInt8 && packed_w.scalar_type() == torch::kUInt8,
               "packed tensors must be uint8");
   TORCH_CHECK(x_scale.scalar_type() == torch::kFloat32 && w_scale.scalar_type() == torch::kFloat16,
@@ -92,8 +105,8 @@ torch::Tensor w4a4_linear_cuda(
   TORCH_CHECK(w_scale.sizes() == torch::IntArrayRef({packed_w.size(0), 1}), "w_scale shape mismatch");
   TORCH_CHECK(output_dtype == torch::kBFloat16 || output_dtype == torch::kFloat16,
               "output_dtype must be BF16 or FP16");
-  c10::cuda::CUDAGuard guard(packed_x.device());
   int64_t m = packed_x.size(0), n = packed_w.size(0), k = packed_x.size(1) * 2;
+  if (m == 0) return torch::empty({m, n}, packed_x.options().dtype(output_dtype));
   auto accum = torch::empty({m, n}, packed_x.options().dtype(torch::kInt32));
   using Gemm = cutlass::gemm::device::Gemm<
       cutlass::int4b_t, cutlass::layout::RowMajor,

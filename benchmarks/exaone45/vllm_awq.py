@@ -1,6 +1,7 @@
 """Offline vLLM generation and latency runner for the EXAONE-4.5 AWQ model."""
 
 import argparse
+import importlib.metadata
 import json
 import statistics
 import time
@@ -55,6 +56,102 @@ def _percentile(values, fraction):
     return ordered[round((len(ordered) - 1) * fraction)]
 
 
+def _distribution(values, prefix):
+    if not values:
+        return {
+            f"{prefix}_min": None,
+            f"{prefix}_median": None,
+            f"{prefix}_mean": None,
+            f"{prefix}_p90": None,
+            f"{prefix}_max": None,
+        }
+    return {
+        f"{prefix}_min": min(values),
+        f"{prefix}_median": statistics.median(values),
+        f"{prefix}_mean": statistics.mean(values),
+        f"{prefix}_p90": _percentile(values, 0.90),
+        f"{prefix}_max": max(values),
+    }
+
+
+def summarize_latency(samples):
+    """Summarize completed generation observations without importing vLLM."""
+    if not samples:
+        raise ValueError("At least one latency sample is required.")
+
+    elapsed = [sample["elapsed_s"] for sample in samples]
+    first_token = [
+        sample["first_token_s"]
+        for sample in samples
+        if sample["first_token_s"] is not None
+    ]
+    tpot_ms = [
+        1000.0
+        * (sample["elapsed_s"] - sample["first_token_s"])
+        / (sample["output_tokens"] - 1)
+        for sample in samples
+        if sample["first_token_s"] is not None and sample["output_tokens"] > 1
+    ]
+    input_throughput = [
+        sample["input_tokens"] / sample["elapsed_s"] for sample in samples
+    ]
+    output_throughput = [
+        sample["output_tokens"] / sample["elapsed_s"] for sample in samples
+    ]
+
+    result = {
+        "ttft_source": (
+            "vllm_request_metrics" if len(first_token) == len(samples) else "unavailable"
+        )
+    }
+    result.update(_distribution(first_token, "ttft_s"))
+    result.update(_distribution(tpot_ms, "tpot_ms"))
+    result.update(_distribution(elapsed, "e2e_s"))
+    result.update(_distribution(input_throughput, "input_tokens_per_s"))
+    result.update(_distribution(output_throughput, "output_tokens_per_s"))
+    return result
+
+
+def _package_version(name):
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def _environment_metadata():
+    import torch
+
+    metadata = {
+        "python_packages": {
+            name: _package_version(name)
+            for name in ("torch", "triton", "vllm", "flatquant-vllm-plugin")
+        },
+        "torch_cuda": torch.version.cuda,
+        "cuda_available": torch.cuda.is_available(),
+    }
+    if torch.cuda.is_available():
+        device = torch.cuda.current_device()
+        properties = torch.cuda.get_device_properties(device)
+        metadata["gpu"] = {
+            "name": properties.name,
+            "compute_capability": f"{properties.major}.{properties.minor}",
+            "total_memory_bytes": properties.total_memory,
+        }
+    return metadata
+
+
+def _first_token_latency(outputs):
+    values = []
+    for output in outputs:
+        metrics = getattr(output, "metrics", None)
+        value = getattr(metrics, "first_token_latency", None)
+        if value is None:
+            return None
+        values.append(value)
+    return statistics.median(values) if values else None
+
+
 def run_latency(args):
     from vllm import SamplingParams
 
@@ -66,13 +163,21 @@ def run_latency(args):
     for _ in range(args.warmup_steps):
         llm.generate(prompts, params, use_tqdm=False)
 
-    elapsed = []
-    generated = []
+    input_tokens = sum(len(token_ids) for token_ids in llm.get_tokenizer()(prompts).input_ids)
+    samples = []
     for _ in range(args.num_repeats):
         start = time.perf_counter()
         outputs = llm.generate(prompts, params, use_tqdm=False)
-        elapsed.append(time.perf_counter() - start)
-        generated.append(sum(len(output.outputs[0].token_ids) for output in outputs))
+        elapsed = time.perf_counter() - start
+        generated = sum(len(output.outputs[0].token_ids) for output in outputs)
+        samples.append(
+            {
+                "first_token_s": _first_token_latency(outputs),
+                "elapsed_s": elapsed,
+                "input_tokens": input_tokens,
+                "output_tokens": generated,
+            }
+        )
 
     result = {
         "backend": "vllm",
@@ -83,13 +188,11 @@ def run_latency(args):
         "max_new_tokens": args.max_new_tokens,
         "warmup_steps": args.warmup_steps,
         "num_repeats": args.num_repeats,
-        "latency_s_mean": statistics.mean(elapsed),
-        "latency_s_median": statistics.median(elapsed),
-        "latency_s_p90": _percentile(elapsed, 0.90),
-        "output_tokens_per_s_mean": statistics.mean(
-            tokens / duration for tokens, duration in zip(generated, elapsed)
-        ),
+        "enforce_eager": args.enforce_eager,
+        "environment": _environment_metadata(),
+        "samples": samples,
     }
+    result.update(summarize_latency(samples))
     rendered = json.dumps(result, indent=2)
     print(rendered)
     if args.output_json:

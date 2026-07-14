@@ -33,6 +33,14 @@ activations and KV cache. Tensor parallelism is currently limited to TP=1.
 See [EXAONE45_QUICKSTART.md](EXAONE45_QUICKSTART.md) for quantization, export,
 and development instructions.
 
+Export a calibrated, real-quantized checkpoint in the native W4A4 vLLM format:
+
+```bash
+python tools/export_flatquant_w4a4_vllm.py \
+  --source outputs/EXAONE-4.5-33B/w4a4-real \
+  --output outputs/EXAONE-4.5-33B/w4a4-vllm
+```
+
 ## Evaluation
 
 Run these benchmarks from the `flatquant-vllm` environment described in

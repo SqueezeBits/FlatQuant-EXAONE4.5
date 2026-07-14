@@ -3,6 +3,7 @@
 import argparse
 import json
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
@@ -20,6 +21,86 @@ TRANSFORM_RENAMES = {
     ".mlp.down_trans.matrix_left": ".mlp.down_proj.flatquant_left",
     ".mlp.down_trans.matrix_right": ".mlp.down_proj.flatquant_right",
 }
+
+PROJECTION_FAMILIES = (
+    "qkv_proj",
+    "o_proj",
+    "gate_up_proj",
+    "down_proj",
+)
+
+
+@dataclass(frozen=True)
+class TransformSelection:
+    """Transform exclusions requested for a freshly quantized checkpoint.
+
+    Each rule is ``(projection, first_layer, last_layer)``. ``None`` bounds mean
+    every layer. This converter intentionally cannot apply non-empty rules to an
+    already packed FlatQuant checkpoint; see :func:`validate_transform_selection`.
+    """
+
+    rules: tuple[tuple[str, int | None, int | None], ...] = ()
+
+    def excludes(self, projection, layer):
+        return any(
+            candidate == projection
+            and (first is None or first <= layer <= last)
+            for candidate, first, last in self.rules
+        )
+
+    def to_manifest(self, num_hidden_layers):
+        included = []
+        excluded = []
+        for layer in range(num_hidden_layers):
+            for projection in PROJECTION_FAMILIES:
+                entry = {"layer": layer, "projection": projection}
+                target = excluded if self.excludes(projection, layer) else included
+                target.append(entry)
+        return {
+            "format_version": 1,
+            "coordinate_system": "flatquant_packed",
+            "included": included,
+            "excluded": excluded,
+        }
+
+
+def parse_transform_selection(specs):
+    """Parse ``PROJECTION`` or ``PROJECTION:FIRST[-LAST]`` exclusions."""
+    rules = []
+    for spec in specs:
+        projection, separator, layer_spec = spec.partition(":")
+        if projection not in PROJECTION_FAMILIES:
+            raise ValueError(
+                f"Unknown transform projection {projection!r}; expected one of "
+                + ", ".join(PROJECTION_FAMILIES)
+            )
+        if not separator:
+            rules.append((projection, None, None))
+            continue
+        if not layer_spec:
+            raise ValueError(f"Missing layer or layer range in {spec!r}")
+        bounds = layer_spec.split("-", 1)
+        try:
+            first = int(bounds[0])
+            last = int(bounds[-1])
+        except ValueError as error:
+            raise ValueError(f"Invalid layer range in {spec!r}") from error
+        if first < 0 or last < first:
+            raise ValueError(f"Invalid inclusive layer range in {spec!r}")
+        rules.append((projection, first, last))
+    return TransformSelection(tuple(rules))
+
+
+def validate_transform_selection(source, selection):
+    """Prevent relabelling weights whose FlatQuant basis is already fixed."""
+    if not selection.rules:
+        return
+    raise ValueError(
+        "A packed checkpoint cannot safely omit online FlatQuant transforms: "
+        "its weights are already expressed in the transformed coordinate system. "
+        "The selected layers must be recalibrated and requantized without those "
+        "transforms before export."
+    )
 
 
 def _rename_transform(key):
@@ -97,9 +178,11 @@ def _ct_config(ignore):
     }
 
 
-def export_checkpoint(source, output, awq_reference):
+def export_checkpoint(source, output, awq_reference, transform_selection=None):
     source = Path(source)
     output = Path(output)
+    transform_selection = transform_selection or TransformSelection()
+    validate_transform_selection(source, transform_selection)
     output.mkdir(parents=True, exist_ok=True)
 
     source_config = json.loads((source / "config.json").read_text())
@@ -108,6 +191,12 @@ def export_checkpoint(source, output, awq_reference):
     source_config["quantization_config"] = ct_config
     (output / "config.json").write_text(json.dumps(source_config, indent=2) + "\n")
     (output / "flatquant_vllm_config.json").write_text(json.dumps(ct_config, indent=2) + "\n")
+    selection_manifest = transform_selection.to_manifest(
+        source_config["text_config"]["num_hidden_layers"]
+    )
+    (output / "flatquant_transform_selection.json").write_text(
+        json.dumps(selection_manifest, indent=2) + "\n"
+    )
     shutil.copy2(source / "quantization_config.json", output / "flatquant_source_config.json")
 
     index = json.loads((source / "model.safetensors.index.json").read_text())
@@ -164,7 +253,7 @@ def export_checkpoint(source, output, awq_reference):
     new_index = {"metadata": {"total_size": total_size}, "weight_map": new_weight_map}
     (output / "model.safetensors.index.json").write_text(json.dumps(new_index, indent=2) + "\n")
 
-    generated = {"config.json", "flatquant_vllm_config.json", "flatquant_source_config.json", "model.safetensors.index.json", *shard_names}
+    generated = {"config.json", "flatquant_vllm_config.json", "flatquant_source_config.json", "flatquant_transform_selection.json", "model.safetensors.index.json", *shard_names}
     for path in source.iterdir():
         if path.name not in generated and path.is_file() and path.suffix not in {".pth", ".safetensors"}:
             shutil.copy2(path, output / path.name)
@@ -175,8 +264,21 @@ def main():
     parser.add_argument("source")
     parser.add_argument("output")
     parser.add_argument("--awq_reference", required=True)
+    parser.add_argument(
+        "--exclude-transform",
+        action="append",
+        default=[],
+        metavar="PROJECTION[:FIRST[-LAST]]",
+        help="Requires recalibration/requantization; packed inputs are refused.",
+    )
     args = parser.parse_args()
-    export_checkpoint(args.source, args.output, args.awq_reference)
+    selection = parse_transform_selection(args.exclude_transform)
+    export_checkpoint(
+        args.source,
+        args.output,
+        args.awq_reference,
+        transform_selection=selection,
+    )
 
 
 if __name__ == "__main__":

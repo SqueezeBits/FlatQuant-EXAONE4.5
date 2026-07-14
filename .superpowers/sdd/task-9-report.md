@@ -15,9 +15,12 @@ runner, but did not run or fabricate the BF16/W4A16/W4A4 matrix because no real
 - vLLM captured 51 mixed prefill/decode piecewise graphs and 35 full decode
   graphs.
 - Equal-shape prompt replay with changed token values produced changed logits.
+- Native `LLM.generate()` outputs had the requested length and repeated token
+  IDs deterministically for repeated inputs.
 - Allocated CUDA memory was identical before and after measured replay.
-- The W4A4 C++ ops now use symbolic Python fake implementations; transform and
-  dispatch marker custom ops also expose fake/Meta implementations.
+- The W4A4 C++ ops now use symbolic Python fake implementations; transform
+  custom ops also expose fake/Meta implementations. The former false-mutation
+  dispatch marker custom op no longer exists.
 - Model construction selected exactly four unique fused W4A4 prefixes. This is
   backend-selection evidence, not replay-call cardinality.
 
@@ -59,13 +62,13 @@ no_result_written=true
 Focused CUDA Graph test:
 
 ```text
-1 passed, 9 deselected, 18 warnings in 34.78s
+1 passed, 9 deselected, 18 warnings in 25.29s
 ```
 
 Available regression suite:
 
 ```text
-126 passed, 18 warnings in 28.53s
+126 passed, 18 warnings in 28.52s
 ```
 
 The brief named `tests/test_w4a4_transform_quant.py`, but that file does not

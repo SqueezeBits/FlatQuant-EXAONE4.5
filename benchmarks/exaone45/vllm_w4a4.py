@@ -236,9 +236,18 @@ def run_cuda_graph_probe(
             and torch.equal(observations[0][0], observations[2][0])
             and torch.equal(observations[1][0], observations[3][0])
         )
+        generated_tokens_valid = (
+            all(len(tokens) == steps for _, tokens in observations)
+            and observations[0][1] == observations[2][1]
+            and observations[1][1] == observations[3][1]
+        )
         stable = all(value == baseline for value in memory_samples)
         if not responds:
             raise RuntimeError("same-shape CUDA Graph replay ignored or corrupted changed values")
+        if not generated_tokens_valid:
+            raise RuntimeError(
+                "native vLLM generation returned incomplete or non-deterministic tokens"
+            )
         if not stable:
             raise RuntimeError(
                 f"CUDA Graph replay allocation changed: baseline={baseline}, samples={memory_samples}"
@@ -247,6 +256,8 @@ def run_cuda_graph_probe(
             "prompt_shape": [1, len(first)],
             "output_length": steps,
             "outputs_respond": True,
+            "native_generation_valid": True,
+            "generated_token_counts": [len(tokens) for _, tokens in observations],
             "allocated_memory_stable": True,
             "allocated_memory_bytes": baseline,
             "replay_count": 4,
@@ -257,7 +268,9 @@ def run_cuda_graph_probe(
         "enforce_eager": False,
         "same_shape_changed_values": True,
         "allocated_memory_stable": True,
-        "native_generation_completed": True,
+        "native_generation_valid": all(
+            replay["native_generation_valid"] for replay in replays
+        ),
         "replays": replays,
         "meta_kernels": meta_kernels,
         "selection_evidence": selection_evidence,

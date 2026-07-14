@@ -12,7 +12,9 @@ full decode graphs, then exercised prompt lengths 2 and 3 with decode lengths 1
 and 2. Each case replayed alternating equal-shape prompts four times. Changed
 values changed logits, repeated values reproduced logits, and
 `torch.cuda.memory_allocated()` stayed at the post-warm-up baseline after every
-replay. The W4A4 quantize, GEMM, and transform operators all had symbolic fake/
+replay. Native `LLM.generate()` output also returned the requested token count
+and reproduced the same token IDs for repeated inputs. The W4A4 quantize, GEMM,
+and transform operators all had symbolic fake/
 Meta implementations. Model construction selected exactly four unique fused
 W4A4 projection prefixes. This is selection evidence, not a replay call count.
 

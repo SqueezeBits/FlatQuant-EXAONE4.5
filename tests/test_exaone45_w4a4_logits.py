@@ -233,6 +233,12 @@ def test_tiny_conditional_checkpoint_cuda_graph_replays_changed_values_with_stab
     assert report["allocated_memory_stable"] is True
     assert len(report["replays"]) == 2
     assert all(item["outputs_respond"] for item in report["replays"])
+    assert report["native_generation_valid"] is True
+    assert all(item["native_generation_valid"] for item in report["replays"])
+    assert [item["generated_token_counts"] for item in report["replays"]] == [
+        [1, 1, 1, 1],
+        [2, 2, 2, 2],
+    ]
     assert all(item["allocated_memory_stable"] for item in report["replays"])
     assert report["selection_evidence"]["w4a4_projection_count"] == 4
     assert len(report["selection_evidence"]["w4a4_projection_prefixes"]) == 4

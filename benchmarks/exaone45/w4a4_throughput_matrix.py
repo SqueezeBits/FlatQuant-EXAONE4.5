@@ -167,17 +167,36 @@ def _run_case_subprocess(script, backend, model, input_length, concurrency, args
         ]
         result = subprocess.run(command, text=True, capture_output=True)
         if result_path.exists():
-            return json.loads(result_path.read_text())
-        row = {
-            "backend": backend, "input_length": input_length, "concurrency": concurrency,
-            "output_length": args.output_length, "prompt_tokens_per_s": None,
-            "requests_per_s": None, "ttft_median_s": None, "ttft_p95_s": None,
-            "peak_gpu_memory_bytes": None, "completed_requests": 0,
-            "selection_evidence": {},
-            "errors": [{"phase": "subprocess", "type": "WorkerExit",
-                        "message": f"exit={result.returncode}; stderr={result.stderr[-2000:]}"}],
-        }
-        return row
+            try:
+                row = json.loads(result_path.read_text())
+            except (OSError, json.JSONDecodeError) as error:
+                return _failed_subprocess_row(
+                    backend, input_length, concurrency, args,
+                    f"invalid worker JSON: {type(error).__name__}: {error}; "
+                    f"exit={result.returncode}; stderr={result.stderr[-2000:]}",
+                )
+            if result.returncode != 0 and not row.get("errors"):
+                row.setdefault("errors", []).append({
+                    "phase": "subprocess", "type": "WorkerExit",
+                    "message": f"exit={result.returncode}; stderr={result.stderr[-2000:]}",
+                })
+            return row
+        return _failed_subprocess_row(
+            backend, input_length, concurrency, args,
+            f"exit={result.returncode}; stderr={result.stderr[-2000:]}",
+        )
+
+
+def _failed_subprocess_row(backend, input_length, concurrency, args, message):
+    return {
+        "backend": backend, "input_length": input_length, "concurrency": concurrency,
+        "output_length": args.output_length, "prompt_tokens_per_s": None,
+        "requests_per_s": None, "ttft_median_s": None, "ttft_p95_s": None,
+        "peak_gpu_memory_bytes": None, "completed_requests": 0,
+        "selection_evidence": {},
+        "errors": [{"phase": "subprocess", "type": "WorkerExit",
+                    "message": message}],
+    }
 
 
 def assess_rows(rows, expected_rows):

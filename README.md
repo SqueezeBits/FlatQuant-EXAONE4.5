@@ -131,6 +131,50 @@ python benchmarks/benchmark_exaone45.py latency \
 | Decode (tokens/s) | 58.3 | 54.0 | **-7.38%** |
 | End-to-end (ms) | 4,416.47 | 4,767.66 | **+7.95%** |
 
+#### FlatQuant A100 transform optimization
+
+The FlatQuant checkpoint, quantized weights, transform factors, and numerical
+algorithm are unchanged. The optimization only changes how the existing
+Kronecker transform is scheduled on SM80 GPUs:
+
+- selects `BLOCK_N=16/32/64` from the projection shape and token-count bucket
+  instead of using one fixed configuration;
+- keeps the fused right+left Kronecker transform and its register-resident
+  intermediate, avoiding an extra kernel launch and BF16 temporary buffer;
+- preserves the vLLM custom-op boundary, `torch.compile`, and CUDA Graph capture;
+- falls back to the previous `BLOCK_N=64, num_warps=4` configuration on unknown
+  GPUs or transform shapes.
+
+Measured on an A100 80 GB with BF16, vLLM 0.24.0, CUDA Graphs, two warmups, and
+five measured runs:
+
+| Workload | FlatQuant baseline | FlatQuant tuned | Improvement |
+| --- | ---: | ---: | ---: |
+| bs=1, prefill=64, decode=128 TPOT | 15.668 ms | 15.267 ms | **-2.56%** |
+| bs=1, prefill=64, decode=128 output throughput | 63.202 tok/s | 64.829 tok/s | **+2.57%** |
+| bs=4, prefill=512, decode=16 TPOT | 17.247 ms | 16.910 ms | **-1.96%** |
+| bs=4, prefill=512, decode=16 output throughput | 61.713 tok/s | 62.246 tok/s | **+0.86%** |
+
+The primary-workload gap after tuning is 1.001 ms TPOT versus AWQ (15.267 vs.
+14.266 ms, approximately 7.0%). Profiling attributes about 9.4% of steady-state
+CUDA kernel time to the online transforms and about 74% to Marlin W4A16 GEMMs.
+
+#### Accuracy regression checks
+
+Because this optimization changes only Triton tile/warp selection, it is not
+expected to change the model-level quantization error. The following regression
+checks were run against the pre-tuning kernel with the same checkpoint:
+
+| Check | Pre-tuning | Tuned | Result |
+| --- | ---: | ---: | --- |
+| WikiText-2 PPL smoke (8 x 2,048-token blocks) | 6.911681770112198 | 6.911681770112198 | **exact match** |
+| Greedy generation (32 output tokens) | SHA-256 `e2252103...b079` | SHA-256 `e2252103...b079` | **byte-exact** |
+| Transform sweep (108 shape/config cases) | fp32 reference | relative max error `< 5e-3` | **pass** |
+
+These checks show no observed numerical or generated-token regression. Full
+dataset PPL, text-eval, and VLM-eval runs remain the release gate; the smoke
+checks above should not be presented as full-benchmark score equivalence.
+
 ## Acknowledgements
 
 This work builds on [FlatQuant](https://github.com/ruikangliu/FlatQuant) and

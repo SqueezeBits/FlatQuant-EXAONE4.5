@@ -41,6 +41,34 @@ python tools/export_flatquant_w4a4_vllm.py \
   --output outputs/EXAONE-4.5-33B/w4a4-vllm
 ```
 
+### Strict W4A4 correctness gates
+
+The correctness runner accepts local checkpoints only; it never downloads a
+model or substitutes another architecture. Strict mode makes unsupported
+shapes/backends fail instead of silently taking a fallback path:
+
+```bash
+FLATQUANT_W4A4_STRICT=1 python benchmarks/exaone45/vllm_w4a4.py generate \
+  --model outputs/EXAONE-4.5-33B/w4a4-vllm \
+  --prompt "Explain activation quantization in one paragraph." \
+  --max-tokens 32 --enforce-eager --report w4a4-generate.json
+
+FLATQUANT_W4A4_STRICT=1 python benchmarks/exaone45/vllm_w4a4.py logits \
+  --model outputs/EXAONE-4.5-33B/w4a4-vllm \
+  --reference outputs/EXAONE-4.5-33B/w4a4-real
+
+FLATQUANT_W4A4_STRICT=1 python benchmarks/exaone45/vllm_w4a4.py ppl \
+  --model outputs/EXAONE-4.5-33B/w4a4-vllm --dataset wikitext2
+```
+
+The `logits` and `ppl` gates deliberately stop after validating their local
+artifact paths in this checkout: the real Transformers reference adapter,
+WikiText-2 tokenization artifacts, calibrated 33B checkpoints, and measured
+tolerances are not distributed here. This is an explicit incomplete gate, not
+a benchmark result. Do not publish zero fallback counts or numerical quality
+claims for those commands until those artifacts are supplied and the gates
+complete successfully.
+
 ## Evaluation
 
 Run these benchmarks from the `flatquant-vllm` environment described in

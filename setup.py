@@ -104,6 +104,8 @@ def get_kernels():
         'deploy/kernels/gemm.cu',
         'deploy/kernels/quant.cu',
         'deploy/kernels/flashinfer.cu',
+        'deploy/kernels/w4a4_bindings.cpp',
+        'deploy/kernels/w4a4_gemm.cu',
     ]
     if extra_kernels:
         return extra_kernels.split() + default_kernels

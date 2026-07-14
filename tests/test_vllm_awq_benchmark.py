@@ -54,6 +54,23 @@ def test_summarize_latency_handles_missing_ttft_and_single_output_token():
     assert result["output_tokens_per_s_median"] == 1.0
 
 
+def test_summarize_latency_uses_per_request_tokens_for_batched_tpot():
+    samples = [
+        {
+            "first_token_s": 0.7,
+            "elapsed_s": 1.0,
+            "input_tokens": 2048,
+            "output_tokens": 64,
+            "output_tokens_per_request": 16,
+        }
+    ]
+
+    result = summarize_latency(samples)
+
+    assert math.isclose(result["tpot_ms_median"], 20.0)
+    assert result["output_tokens_per_s_median"] == 64.0
+
+
 def test_summarize_latency_rejects_empty_samples():
     try:
         summarize_latency([])

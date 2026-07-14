@@ -93,9 +93,10 @@ def summarize_latency(samples):
     tpot_ms = [
         1000.0
         * (sample["elapsed_s"] - sample["first_token_s"])
-        / (sample["output_tokens"] - 1)
+        / (sample.get("output_tokens_per_request", sample["output_tokens"]) - 1)
         for sample in samples
-        if sample["first_token_s"] is not None and sample["output_tokens"] > 1
+        if sample["first_token_s"] is not None
+        and sample.get("output_tokens_per_request", sample["output_tokens"]) > 1
     ]
     input_throughput = [
         sample["input_tokens"] / sample["elapsed_s"] for sample in samples
@@ -174,13 +175,15 @@ def run_latency(args):
         start = time.perf_counter()
         outputs = llm.generate(prompts, params, use_tqdm=False)
         elapsed = time.perf_counter() - start
-        generated = sum(len(output.outputs[0].token_ids) for output in outputs)
+        generated_per_request = [len(output.outputs[0].token_ids) for output in outputs]
+        generated = sum(generated_per_request)
         samples.append(
             {
                 "first_token_s": _first_token_latency(outputs),
                 "elapsed_s": elapsed,
                 "input_tokens": input_tokens,
                 "output_tokens": generated,
+                "output_tokens_per_request": max(generated_per_request, default=0),
             }
         )
 

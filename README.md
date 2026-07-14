@@ -111,7 +111,7 @@ python benchmarks/benchmark_exaone45.py eval \
 | AWQ | standard=17.98 / vision=20.93 |
 | FlatQuant W4A16 | standard=18.90 / vision=20.06 |
 
-### Latency
+### Speed up - A100
 
 ```bash
 python benchmarks/benchmark_exaone45.py latency \
@@ -124,56 +124,36 @@ python benchmarks/benchmark_exaone45.py latency \
   --warmup_steps 2 --num_repeats 10
 ```
 
-| Metric | AWQ | FlatQuant W4A16 | Change |
+| Metric | AWQ | FlatQuant W4A16 | AWQ 대비 |
 | --- | ---: | ---: | ---: |
-| Prefill (tokens/s) | 79,036.3 | 81,854.7 | **+3.57%** |
-| Decode (ms/step) | 17.151 | 18.526 | **+8.02%** |
-| Decode (tokens/s) | 58.3 | 54.0 | **-7.38%** |
-| End-to-end (ms) | 4,416.47 | 4,767.66 | **+7.95%** |
+| Prefill (tokens/s) | 86,311.6 | 82,260.2 | **-4.69%** |
+| Decode (ms/step) | 17.104 | 18.108 | **+5.87%** |
+| Decode (tokens/s) | 58.5 | 55.2 | **-5.54%** |
+| End-to-end (ms) | 4,402.42 | 4,660.62 | **+5.86%** |
 
 #### FlatQuant A100 transform optimization
 
-The FlatQuant checkpoint, quantized weights, transform factors, and numerical
-algorithm are unchanged. The optimization only changes how the existing
-Kronecker transform is scheduled on SM80 GPUs:
+FlatQuant W4A16 uses the same vLLM scheduler, attention backend, and Marlin
+W4A16 GEMM path as AWQ, with learned online transforms added before the
+quantized projections. The following optimizations were accumulated from the
+initial vLLM implementation to the result above:
 
-- selects `BLOCK_N=16/32/64` from the projection shape and token-count bucket
-  instead of using one fixed configuration;
-- keeps the fused right+left Kronecker transform and its register-resident
-  intermediate, avoiding an extra kernel launch and BF16 temporary buffer;
-- preserves the vLLM custom-op boundary, `torch.compile`, and CUDA Graph capture;
-- falls back to the previous `BLOCK_N=64, num_warps=4` configuration on unknown
-  GPUs or transform shapes.
+- removed the identity allocation and unnecessary right-transform kernel from
+  `o_proj`;
+- fused the right and left Kronecker factors into one Triton kernel, keeping the
+  intermediate in registers and removing a BF16 temporary buffer and its
+  global-memory traffic;
+- registered the transforms as PyTorch custom ops so vLLM can retain
+  `torch.compile` and FULL/PIECEWISE CUDA Graph capture without graph breaks;
+- selected `BLOCK_N=16/32/64` from the projection shape and token-count bucket
+  on A100, with the previous safe configuration retained as the fallback for
+  unknown GPUs and shapes.
 
-Measured on an A100 80 GB with BF16, vLLM 0.24.0, CUDA Graphs, two warmups, and
-five measured runs:
-
-| Workload | FlatQuant baseline | FlatQuant tuned | Improvement |
-| --- | ---: | ---: | ---: |
-| bs=1, prefill=64, decode=128 TPOT | 15.668 ms | 15.267 ms | **-2.56%** |
-| bs=1, prefill=64, decode=128 output throughput | 63.202 tok/s | 64.829 tok/s | **+2.57%** |
-| bs=4, prefill=512, decode=16 TPOT | 17.247 ms | 16.910 ms | **-1.96%** |
-| bs=4, prefill=512, decode=16 output throughput | 61.713 tok/s | 62.246 tok/s | **+0.86%** |
-
-The primary-workload gap after tuning is 1.001 ms TPOT versus AWQ (15.267 vs.
-14.266 ms, approximately 7.0%). Profiling attributes about 9.4% of steady-state
-CUDA kernel time to the online transforms and about 74% to Marlin W4A16 GEMMs.
-
-#### Accuracy regression checks
-
-Because this optimization changes only Triton tile/warp selection, it is not
-expected to change the model-level quantization error. The following regression
-checks were run against the pre-tuning kernel with the same checkpoint:
-
-| Check | Pre-tuning | Tuned | Result |
-| --- | ---: | ---: | --- |
-| WikiText-2 PPL smoke (8 x 2,048-token blocks) | 6.911681770112198 | 6.911681770112198 | **exact match** |
-| Greedy generation (32 output tokens) | SHA-256 `e2252103...b079` | SHA-256 `e2252103...b079` | **byte-exact** |
-| Transform sweep (108 shape/config cases) | fp32 reference | relative max error `< 5e-3` | **pass** |
-
-These checks show no observed numerical or generated-token regression. Full
-dataset PPL, text-eval, and VLM-eval runs remain the release gate; the smoke
-checks above should not be presented as full-benchmark score equivalence.
+The checkpoint, packed INT4 weights, transform factors, and transform equations
+are unchanged. The pre-tuning and final kernels produced identical WikiText-2
+PPL in an 8 x 2,048-token smoke test (`6.911681770112198`) and byte-identical
+32-token greedy output; all 108 transform shape/config checks stayed within
+`5e-3` relative maximum error against the fp32 reference.
 
 ## Acknowledgements
 

@@ -87,5 +87,97 @@ class FusedKronTransformTest(unittest.TestCase):
                 self.assertLessEqual(fused_rel.item(), two_rel.item() + 1e-4)
 
 
+class KronConfigSelectionTest(unittest.TestCase):
+    def test_benchmark_candidate_set_is_bounded(self):
+        from benchmarks.transform_kernel_benchmark import candidate_configs
+        from flatquant_vllm_plugin.triton_transform_v2 import KronConfig
+
+        self.assertEqual(
+            candidate_configs(),
+            [
+                KronConfig(block_n=16, num_warps=4),
+                KronConfig(block_n=16, num_warps=8),
+                KronConfig(block_n=32, num_warps=4),
+                KronConfig(block_n=32, num_warps=8),
+                KronConfig(block_n=64, num_warps=4),
+                KronConfig(block_n=64, num_warps=8),
+            ],
+        )
+
+    def test_selection_is_stable_for_token_bucket_boundaries(self):
+        from flatquant_vllm_plugin.triton_transform_v2 import (
+            KronConfig,
+            select_kron_config,
+        )
+
+        allowed = {
+            KronConfig(block_n=16, num_warps=4),
+            KronConfig(block_n=16, num_warps=8),
+            KronConfig(block_n=32, num_warps=4),
+            KronConfig(block_n=32, num_warps=8),
+            KronConfig(block_n=64, num_warps=4),
+            KronConfig(block_n=64, num_warps=8),
+        }
+        for shape in ((64, 80), (128, 214), (16, 16)):
+            for tokens in (1, 16, 17, 256, 257, 2048):
+                first = select_kron_config(*shape, tokens, compute_capability=(8, 0))
+                second = select_kron_config(*shape, tokens, compute_capability=(8, 0))
+                self.assertEqual(first, second)
+                self.assertIn(first, allowed)
+
+    def test_unknown_shape_uses_documented_fallback(self):
+        from flatquant_vllm_plugin.triton_transform_v2 import (
+            KronConfig,
+            select_kron_config,
+        )
+
+        self.assertEqual(
+            select_kron_config(7, 11, 37, compute_capability=(8, 0)),
+            KronConfig(block_n=64, num_warps=4),
+        )
+
+    def test_unknown_gpu_uses_documented_fallback(self):
+        from flatquant_vllm_plugin.triton_transform_v2 import (
+            KronConfig,
+            select_kron_config,
+        )
+
+        self.assertEqual(
+            select_kron_config(64, 80, 1, compute_capability=(9, 0)),
+            KronConfig(block_n=64, num_warps=4),
+        )
+
+    def test_exaone_shapes_use_measured_a100_configs(self):
+        from flatquant_vllm_plugin.triton_transform_v2 import (
+            KronConfig,
+            select_kron_config,
+        )
+
+        expected = {
+            (64, 80, 1): KronConfig(16, 4),
+            (64, 80, 16): KronConfig(16, 4),
+            (64, 80, 64): KronConfig(32, 4),
+            (64, 80, 256): KronConfig(32, 4),
+            (64, 80, 512): KronConfig(32, 4),
+            (64, 80, 2048): KronConfig(64, 4),
+            (128, 214, 1): KronConfig(16, 4),
+            (128, 214, 16): KronConfig(32, 4),
+            (128, 214, 64): KronConfig(32, 4),
+            (128, 214, 256): KronConfig(32, 4),
+            (128, 214, 512): KronConfig(64, 4),
+            (128, 214, 2048): KronConfig(64, 4),
+        }
+        for (left_size, right_size, tokens), config in expected.items():
+            self.assertEqual(
+                select_kron_config(
+                    left_size,
+                    right_size,
+                    tokens,
+                    compute_capability=(8, 0),
+                ),
+                config,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -11,11 +11,55 @@ Two implementations live here:
   allocated and only one kernel is launched per projection.
 """
 
+from dataclasses import dataclass
+
 import torch
 import triton
 import triton.language as tl
 
 from .triton_transform import _right_transform_kernel, _torch_transform
+
+
+@dataclass(frozen=True)
+class KronConfig:
+    block_n: int
+    num_warps: int
+
+
+_DEFAULT_KRON_CONFIG = KronConfig(block_n=64, num_warps=4)
+_TUNED_KRON_CONFIGS = {
+    (64, 80, 4): KronConfig(16, 4),
+    (64, 80, 16): KronConfig(16, 4),
+    (64, 80, 256): KronConfig(32, 4),
+    (64, 80, 512): KronConfig(32, 4),
+    (64, 80, 2048): KronConfig(64, 4),
+    (128, 214, 4): KronConfig(16, 4),
+    (128, 214, 16): KronConfig(32, 4),
+    (128, 214, 256): KronConfig(32, 4),
+    (128, 214, 512): KronConfig(64, 4),
+    (128, 214, 2048): KronConfig(64, 4),
+}
+
+
+def _token_bucket(tokens):
+    if tokens <= 4:
+        return 4
+    if tokens <= 16:
+        return 16
+    if tokens <= 256:
+        return 256
+    if tokens <= 512:
+        return 512
+    return 2048
+
+
+def select_kron_config(left_size, right_size, tokens, *, compute_capability=None):
+    if compute_capability != (8, 0):
+        return _DEFAULT_KRON_CONFIG
+    return _TUNED_KRON_CONFIGS.get(
+        (left_size, right_size, _token_bucket(tokens)),
+        _DEFAULT_KRON_CONFIG,
+    )
 
 
 @triton.jit
@@ -114,7 +158,9 @@ def _fused_kron_kernel(
     )
 
 
-def flatquant_kron_transform(x, left, right, *, backend="triton", block_n=64):
+def flatquant_kron_transform(
+    x, left, right, *, backend="triton", block_n=None, num_warps=None
+):
     """Fused single-launch ``x @ kron(left, right)`` preserving ``x.shape``."""
     if x.shape[-1] != left.shape[0] * right.shape[0]:
         raise ValueError("Input width does not match transform factors.")
@@ -129,6 +175,18 @@ def flatquant_kron_transform(x, left, right, *, backend="triton", block_n=64):
     right_size = right.shape[0]
     l_pad = triton.next_power_of_2(left_size)
     r_pad = triton.next_power_of_2(right_size)
+    if block_n is None:
+        config = select_kron_config(
+            left_size,
+            right_size,
+            batches,
+            compute_capability=torch.cuda.get_device_capability(x.device),
+        )
+        block_n = config.block_n
+        if num_warps is None:
+            num_warps = config.num_warps
+    if num_warps is None:
+        num_warps = _DEFAULT_KRON_CONFIG.num_warps
     block_n = min(block_n, r_pad)
 
     value = x.contiguous().reshape(batches * left_size, right_size)
@@ -143,6 +201,7 @@ def flatquant_kron_transform(x, left, right, *, backend="triton", block_n=64):
         L_PAD=l_pad,
         R_PAD=r_pad,
         BLOCK_N=block_n,
+        num_warps=num_warps,
     )
     return output.reshape(shape)
 

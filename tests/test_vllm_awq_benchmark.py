@@ -1,6 +1,7 @@
 import math
+from types import SimpleNamespace
 
-from benchmarks.exaone45.vllm_awq import summarize_latency
+from benchmarks.exaone45.vllm_awq import _engine_kwargs, summarize_latency
 
 
 def test_summarize_latency_reports_ttft_tpot_and_throughput():
@@ -60,3 +61,20 @@ def test_summarize_latency_rejects_empty_samples():
         assert str(error) == "At least one latency sample is required."
     else:
         raise AssertionError("empty samples must be rejected")
+
+
+def test_engine_kwargs_enable_request_metrics():
+    args = SimpleNamespace(
+        model_path="model",
+        tokenizer=None,
+        dtype="bfloat16",
+        tensor_parallel_size=1,
+        gpu_memory_utilization=0.9,
+        max_model_len=1024,
+        enforce_eager=False,
+        enable_prefix_caching=False,
+    )
+
+    kwargs = _engine_kwargs(args)
+
+    assert kwargs["disable_log_stats"] is False

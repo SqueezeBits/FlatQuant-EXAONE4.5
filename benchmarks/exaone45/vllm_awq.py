@@ -15,10 +15,8 @@ DEFAULT_AWQ_PATH = (
 )
 
 
-def _build_engine(args):
-    from vllm import LLM
-
-    return LLM(
+def _engine_kwargs(args):
+    return dict(
         model=args.model_path,
         tokenizer=args.tokenizer or args.model_path,
         dtype=args.dtype,
@@ -28,7 +26,14 @@ def _build_engine(args):
         trust_remote_code=True,
         enforce_eager=args.enforce_eager,
         enable_prefix_caching=args.enable_prefix_caching,
+        disable_log_stats=False,
     )
+
+
+def _build_engine(args):
+    from vllm import LLM
+
+    return LLM(**_engine_kwargs(args))
 
 
 def _prompt_text(tokenizer, prompt, target_tokens):

@@ -8,7 +8,11 @@ from flatquant_vllm_plugin.w4a4_config import (
     FlatQuantW4A4Config,
     FlatQuantW4A4LinearMethod,
 )
-from flatquant_vllm_plugin.w4a4_ops import DispatchCounters
+from flatquant_vllm_plugin.w4a4_ops import (
+    DispatchCounters,
+    apply_w4a4,
+    dispatch_counters,
+)
 
 
 class FakeLinear(nn.Module):
@@ -109,7 +113,7 @@ def test_native_loaders_copy_fused_rows_without_repacking(config):
     )
     layer = _create(method)
     packed = torch.arange(12 * 32, dtype=torch.int64).to(torch.uint8).reshape(12, 32)
-    scales = torch.arange(12, dtype=torch.float32).reshape(12, 1)
+    scales = torch.arange(12, dtype=torch.float16).reshape(12, 1)
 
     layer.weight.weight_loader(layer.weight, packed)
     layer.weight_scale.weight_loader(layer.weight_scale, scales)
@@ -133,7 +137,9 @@ def test_activation_clip_loader_accepts_exported_scalar(config):
         FakeLinear(), "language_model.model.layers.0.self_attn.qkv_proj"
     )
     layer = _create(method)
-    layer.activation_clip.weight_loader(layer.activation_clip, torch.tensor(0.75))
+    layer.activation_clip.weight_loader(
+        layer.activation_clip, torch.tensor(0.75, dtype=torch.float16)
+    )
     assert layer.activation_clip.shape == (1,)
     assert layer.activation_clip.item() == pytest.approx(0.75, abs=1e-3)
 
@@ -149,3 +155,101 @@ def test_dispatch_counters_snapshot_is_a_copy():
 def test_import_registers_native_custom_operators():
     assert hasattr(torch.ops.flatquant, "quantize_pack_i4")
     assert hasattr(torch.ops.flatquant, "w4a4_linear")
+
+
+@pytest.mark.parametrize(
+    ("parameter_name", "wrong_dtype"),
+    [
+        ("weight", torch.int8),
+        ("weight_scale", torch.float32),
+        ("flatquant_left", torch.float16),
+        ("flatquant_right", torch.float16),
+        ("activation_clip", torch.float32),
+    ],
+)
+def test_loaders_reject_wrong_dtype_for_every_parameter_family(
+    config, parameter_name, wrong_dtype
+):
+    method = config.get_quant_method(
+        FakeLinear(), "language_model.model.layers.0.self_attn.qkv_proj"
+    )
+    layer = _create(method)
+    parameter = getattr(layer, parameter_name)
+    loaded = torch.empty(parameter.shape, dtype=wrong_dtype)
+    with pytest.raises(ValueError, match="expected dtype"):
+        parameter.weight_loader(parameter, loaded)
+
+
+def test_all_native_parameters_have_direct_whole_tensor_loaders(config):
+    method = config.get_quant_method(
+        FakeLinear(), "language_model.model.layers.0.self_attn.qkv_proj"
+    )
+    layer = _create(method)
+    names = (
+        "weight",
+        "weight_scale",
+        "flatquant_left",
+        "flatquant_right",
+        "activation_clip",
+    )
+    assert all(callable(getattr(layer, name).weight_loader) for name in names)
+
+    expected = {
+        "weight": torch.arange(layer.weight.numel(), dtype=torch.int64)
+        .to(torch.uint8)
+        .reshape(layer.weight.shape),
+        "weight_scale": torch.arange(
+            layer.weight_scale.numel(), dtype=torch.float16
+        ).reshape(layer.weight_scale.shape),
+        "flatquant_left": torch.arange(
+            layer.flatquant_left.numel(), dtype=torch.bfloat16
+        ).reshape(layer.flatquant_left.shape),
+        "flatquant_right": torch.arange(
+            layer.flatquant_right.numel(), dtype=torch.bfloat16
+        ).reshape(layer.flatquant_right.shape),
+        "activation_clip": torch.tensor(0.625, dtype=torch.float16),
+    }
+    for name, loaded in expected.items():
+        parameter = getattr(layer, name)
+        parameter.weight_loader(parameter, loaded)
+        assert torch.equal(parameter, loaded.reshape(parameter.shape))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_apply_w4a4_cuda_preserves_leading_dims_bias_and_counts(config):
+    method = config.get_quant_method(
+        FakeLinear(), "language_model.model.layers.0.self_attn.qkv_proj"
+    )
+    layer = _create(method, input_size=256, output_parts=(8,)).cuda()
+    with torch.no_grad():
+        layer.weight.fill_(0x11)
+        layer.weight_scale.fill_(0.25)
+        layer.activation_clip.fill_(1)
+        layer.flatquant_left.copy_(
+            torch.eye(16, dtype=torch.bfloat16, device="cuda")
+        )
+        layer.flatquant_right.copy_(
+            torch.eye(16, dtype=torch.bfloat16, device="cuda")
+        )
+
+    x = torch.linspace(-1, 1, 2 * 3 * 256, device="cuda", dtype=torch.bfloat16)
+    x = x.reshape(2, 3, 256)
+    bias = torch.arange(8, device="cuda", dtype=torch.bfloat16)
+    before = dispatch_counters.snapshot().get("w4a4", 0)
+
+    packed_x, x_scale = torch.ops.flatquant.quantize_pack_i4(
+        x.reshape(-1, 256).contiguous(), layer.activation_clip
+    )
+    expected = torch.ops.flatquant.w4a4_linear(
+        packed_x, layer.weight, x_scale, layer.weight_scale, torch.bfloat16
+    ).reshape(2, 3, 8)
+
+    without_bias = apply_w4a4(layer, x)
+    with_bias = method.apply(layer, x, bias)
+
+    assert without_bias.shape == (2, 3, 8)
+    assert without_bias.dtype == torch.bfloat16
+    assert torch.count_nonzero(without_bias) > 0
+    torch.testing.assert_close(without_bias, expected)
+    torch.testing.assert_close(with_bias, expected + bias)
+    assert dispatch_counters.snapshot()["w4a4"] == before + 2

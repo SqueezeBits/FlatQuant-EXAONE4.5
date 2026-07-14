@@ -21,12 +21,16 @@ def _whole_tensor_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> No
         raise ValueError(
             f"expected shape {tuple(param.shape)}, got {tuple(loaded_weight.shape)}"
         )
+    if loaded_weight.dtype != param.dtype:
+        raise ValueError(f"expected dtype {param.dtype}, got {loaded_weight.dtype}")
     param.data.copy_(loaded_weight)
 
 
 def _scalar_tensor_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
     if loaded_weight.numel() != 1:
         raise ValueError(f"expected scalar tensor, got shape {tuple(loaded_weight.shape)}")
+    if loaded_weight.dtype != param.dtype:
+        raise ValueError(f"expected dtype {param.dtype}, got {loaded_weight.dtype}")
     param.data.copy_(loaded_weight.reshape(param.shape))
 
 

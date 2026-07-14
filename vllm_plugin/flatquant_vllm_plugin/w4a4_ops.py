@@ -29,12 +29,15 @@ dispatch_counters = DispatchCounters()
 
 
 def apply_w4a4(layer, x, bias=None):
-    transformed = apply_transform(layer, x)
+    leading_shape = x.shape[:-1]
+    flat_x = x.reshape(-1, x.shape[-1])
+    transformed = apply_transform(layer, flat_x)
     packed_x, x_scale = torch.ops.flatquant.quantize_pack_i4(
         transformed.contiguous(), layer.activation_clip
     )
     output = torch.ops.flatquant.w4a4_linear(
         packed_x, layer.weight, x_scale, layer.weight_scale, x.dtype
     )
+    output = output.reshape(*leading_shape, output.shape[-1])
     dispatch_counters.increment("w4a4")
     return output if bias is None else output + bias

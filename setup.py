@@ -169,7 +169,7 @@ if __name__ == '__main__':
     remove_unwanted_pytorch_nvcc_flags()
     setup(
         name='flatquant',
-        packages=['flatquant', 'deploy'],
+        packages=['flatquant', 'deploy', 'flatquant_w4a4'],
         ext_modules=get_extensions(),
         cmdclass={
             'build_ext': BuildExtension

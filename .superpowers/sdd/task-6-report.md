@@ -2,10 +2,11 @@
 
 ## Status
 
-Implemented and correctness-tested a genuine fused-memory candidate, but did
-not enable it in `apply_w4a4`: the required A100 prefill benchmark gate failed.
-Production dispatch therefore remains the faster composed transform + Task 3
-CUDA quantizer.
+An experimental fused-memory candidate was implemented and tested, but the
+required A100 prefill benchmark gate failed. The rejected runtime, its tests,
+and its benchmark CLI were removed after review. Production dispatch remains
+the faster composed transform + Task 3 CUDA quantizer, with no retained Task 6
+runtime complexity.
 
 ## RED
 
@@ -16,21 +17,21 @@ during collection with:
 ModuleNotFoundError: No module named 'flatquant_vllm_plugin.w4a4_transform_quant'
 ```
 
-## GREEN
+## Experimental result (subsequently removed)
 
-`w4a4_transform_quant.py` implements a two-launch recomputation boundary:
+The candidate used a two-launch recomputation boundary:
 
 1. Transform tiles reduce into per-row FP32 maxima with atomics.
 2. Transform tiles are recomputed, clipped, rounded with `div.rn` plus
    `float2int_rn`, clamped, and packed low nibble first.
 
-This truly removes the `[M, K]` transformed global allocation and its subsequent
-read. It does not label a composition of the existing operators as fused.
-Fixed output buffers are `[M, K/2] uint8` and `[M, 1] float32`, matching the
+The experiment genuinely removed the `[M, K]` transformed global allocation
+and its subsequent read; it was not merely a composition of existing operators.
+Its output buffers were `[M, K/2] uint8` and `[M, 1] float32`, matching the
 Task 3 operator and `w4a4_linear` ABI. The task brief's FP16 scale statement is
 incompatible with the checked-in Task 3 binding, which explicitly requires
-FP32 activation scales. Fake/meta custom-op implementations cover both
-left-only and Kronecker variants.
+FP32 activation scales. The removed candidate covered both left-only and
+Kronecker variants.
 
 Exactness covers M=1,16,128,1024, clip=0.625/boundary values, non-contiguous API
 input, and actual EXAONE factor families: left-only 40 (K=6400), 64x80, and
@@ -46,19 +47,20 @@ Verification:
 # tests/test_exaone45_w4a4_logits.py
 ```
 
-Strict dispatch counters are unchanged because production `apply_w4a4` remains
-on its existing path.
+These were candidate-validation results, not tests retained in the final tree.
+Strict dispatch counters remained unchanged because production `apply_w4a4`
+never retained the experimental path.
 
 ## A100 benchmark
 
-Command:
+Historical command used before removal:
 
 ```
 PYTHONPATH=.:vllm_plugin python benchmarks/kernel_benchmark.py \
   --kernel w4a4-transform-quant --rows 128 512 1024 4096
 ```
 
-The harness performs 20 warmups and 100 individually timed iterations and
+The temporary harness performed 20 warmups and 100 individually timed iterations and
 checks exact packed output before timing.
 
 | rows | composed median us | composed p95 us | candidate median us | candidate p95 us |
@@ -74,11 +76,26 @@ than the eliminated memory traffic, so the production switch was reverted.
 
 ## Self-review / concerns
 
-- The candidate is deliberately retained as measured evidence and a reusable
-  exactness baseline, not enabled or described as a production speedup.
+- Only the measured evidence is retained in this report. The rejected runtime,
+  candidate-only tests, and benchmark plumbing are absent from the final tree.
 - A faster dense-transform fusion would need a different cross-program row
   reduction mechanism or a downstream GEMM interface that consumes tiled
   scales; neither is a small safe change to the Task 3 ABI.
 - Benchmark allocation is outside the measured synchronization boundary only
   for persistent inputs; operator output allocation remains part of both paths,
   reflecting runtime use.
+
+## Final post-removal regression
+
+After removing all rejected candidate code and restoring
+`benchmarks/kernel_benchmark.py` byte-for-byte to its pre-Task 6 version:
+
+```
+PYTHONPATH=.:vllm_plugin pytest -q \
+  tests/test_vllm_w4a4_plugin.py tests/test_exaone45_w4a4_logits.py
+
+25 passed, 18 warnings in 15.14s
+```
+
+This verifies the composed production path, strict dispatch accounting, and
+EXAONE logits/load/generation gates without any candidate runtime dependency.

@@ -1,15 +1,9 @@
 import triton
 import triton.language as tl
 import torch
-import argparse
-import os
-import statistics
-import sys
 from triton.language.extra import libdevice
 import deploy
 from deploy.nn.quantization import Quantizer
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "vllm_plugin"))
 
 
 @triton.autotune(
@@ -252,65 +246,7 @@ def benchmark(B, M, N, S, provider):
     return perf(ms), perf(max_ms), perf(min_ms), ms, max_ms, min_ms
 
 
-def _time_us(fn, warmups=20, iterations=100):
-    for _ in range(warmups):
-        fn()
-    torch.cuda.synchronize()
-    samples = []
-    for _ in range(iterations):
-        begin, end = torch.cuda.Event(True), torch.cuda.Event(True)
-        begin.record()
-        fn()
-        end.record()
-        end.synchronize()
-        samples.append(begin.elapsed_time(end) * 1000.0)
-    samples.sort()
-    return statistics.median(samples), samples[int(0.95 * (len(samples) - 1))]
-
-
-def benchmark_w4a4_transform_quant(rows):
-    from flatquant_vllm_plugin.transform import apply_transform
-    from flatquant_vllm_plugin.w4a4_transform_quant import transform_quantize_pack
-
-    class Layer:
-        pass
-
-    torch.manual_seed(0)
-    layer = Layer()
-    layer.flatquant_left = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16) / 64
-    layer.flatquant_right = torch.randn(80, 80, device="cuda", dtype=torch.bfloat16) / 80
-    x = torch.randn(rows, 5120, device="cuda", dtype=torch.bfloat16)
-    clip = torch.tensor([0.625], device="cuda", dtype=torch.float16)
-
-    def composed():
-        transformed = apply_transform(layer, x)
-        return torch.ops.flatquant.quantize_pack_i4(transformed.contiguous(), clip)
-
-    def fused():
-        return transform_quantize_pack(
-            x, layer.flatquant_left, layer.flatquant_right, clip
-        )
-
-    reference = composed()
-    actual = fused()
-    torch.testing.assert_close(actual[0], reference[0], rtol=0, atol=0)
-    torch.testing.assert_close(actual[1], reference[1], rtol=1e-3, atol=1e-5)
-    return _time_us(composed), _time_us(fused)
-
-
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--kernel")
-    parser.add_argument("--rows", nargs="+", type=int, default=[128, 512, 1024, 4096])
-    args = parser.parse_args()
-    if args.kernel == "w4a4-transform-quant":
-        print("rows composed_median_us composed_p95_us fused_median_us fused_p95_us")
-        for rows in args.rows:
-            composed_time, fused_time = benchmark_w4a4_transform_quant(rows)
-            print(rows, *composed_time, *fused_time)
-        raise SystemExit(0)
-    if args.kernel is not None:
-        parser.error(f"unknown kernel: {args.kernel}")
     # triton_perf_avg, triton_perf_max, triton_perf_min, \
     # triton_time_avg, triton_time_max, triton_time_min = benchmark(1 * 1, 64, 64, 4096, 'triton')
     # cublas_perf_avg, cublas_perf_max, cublas_perf_min, \

@@ -7,7 +7,7 @@ from torch import nn
 
 from flatquant_w4a4.format import validate_manifest
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.model_executor.layers.linear import LinearMethodBase
+from vllm.model_executor.layers.linear import LinearMethodBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization import register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
@@ -143,7 +143,11 @@ class FlatQuantW4A4Config(QuantizationConfig):
         suffixes = (".qkv_proj", ".o_proj", ".gate_up_proj", ".down_proj")
         if "language_model.model.layers." in prefix and prefix.endswith(suffixes):
             return FlatQuantW4A4LinearMethod(prefix)
-        return None
+        # Embedding classes also consult this hook and must select their own
+        # UnquantizedEmbeddingMethod when the quant config does not target them.
+        if hasattr(layer, "num_embeddings") and hasattr(layer, "embedding_dim"):
+            return None
+        return UnquantizedLinearMethod()
 
     def get_embedding_quant_method(self, layer, prefix):
         return None

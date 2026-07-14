@@ -1,6 +1,7 @@
 import pytest
 import torch
 from torch import nn
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 
 from flatquant_w4a4.format import validate_manifest
 from flatquant_vllm_plugin import w4a4_config
@@ -54,7 +55,10 @@ def test_only_exaone_text_projections_are_wrapped(config):
         FakeLinear(), "language_model.model.layers.0.self_attn.qkv_proj"
     )
     assert isinstance(method, FlatQuantW4A4LinearMethod)
-    assert config.get_quant_method(FakeLinear(), "visual.blocks.0.mlp.down_proj") is None
+    assert isinstance(
+        config.get_quant_method(FakeLinear(), "visual.blocks.0.mlp.down_proj"),
+        UnquantizedLinearMethod,
+    )
 
 
 def test_tp_two_is_rejected(monkeypatch, config):
@@ -150,6 +154,13 @@ def test_dispatch_counters_snapshot_is_a_copy():
     snapshot = counters.snapshot()
     snapshot["w4a4"] = 99
     assert counters.snapshot() == {"w4a4": 1}
+
+
+def test_dispatch_counters_can_be_reset_for_worker_rpc_observability():
+    counters = DispatchCounters()
+    counters.increment("w4a4")
+    assert counters.reset() == {"w4a4": 1}
+    assert counters.snapshot() == {}
 
 
 def test_import_registers_native_custom_operators():

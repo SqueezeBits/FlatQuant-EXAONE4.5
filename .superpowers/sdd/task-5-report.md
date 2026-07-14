@@ -52,3 +52,50 @@ WikiText-2 PPL was measured. None is claimed.
 To finish the task, supply the two real local checkpoints/reference artifacts
 and either expose the worker counter through vLLM worker RPC or define an
 approved worker-extension hook for the tiny fixture.
+
+## Review-fix RED/GREEN (2026-07-14)
+
+The blocked-review findings were reproduced and fixed using installed vLLM
+0.24.0 contracts. RED sequence:
+
+- Counter test failed because `DispatchCounters.reset` and worker aggregation
+  did not exist.
+- Tiny conditional load first rejected unregistered `flatquant_w4a4`; the
+  loader imported the package but did not call its `register()` entry point.
+- The real `Exaone4_5_Processor` required image/video processor assets. A
+  minimal local nested processor config using the model's official
+  Qwen2VL image/video processor types fixed this; text prompts use token IDs
+  and multimodal limits are zero.
+- vLLM rejected `None` for non-target visual linears, then rejected a linear
+  method for embeddings. The config now returns `UnquantizedLinearMethod` for
+  non-target linears and `None` for embeddings.
+- Weight load exposed the exact HF/vLLM mapping difference:
+  `model.language_model.*` must become `language_model.model.*`.
+- The first successful generation returned the worker-observed count `4`, not
+  the initially hypothesized `8`: one one-layer prefill invokes exactly qkv,
+  o, gate-up, and down once.
+
+GREEN commands and results:
+
+`FLATQUANT_W4A4_STRICT=1 PYTHONPATH=$PWD/vllm_plugin:$PWD /venv/main/bin/pytest -q tests/test_exaone45_w4a4_logits.py::test_tiny_conditional_checkpoint_loads_generates_and_dispatches_w4a4`
+
+Result: `1 passed` on A100. It constructs a deterministic one-layer
+`Exaone4_5_ForConditionalGeneration`, depth-zero vision tower, local tokenizer
+and processor, native packed W4A4 tensors under
+`language_model.model.layers.0`, loads `vllm.LLM(enforce_eager=True,
+tensor_parallel_size=1)`, generates one greedy token, and asserts worker RPC
+count `w4a4 == 4`.
+
+`PYTHONPATH=$PWD/vllm_plugin:$PWD /venv/main/bin/pytest -q tests/test_vllm_w4a4_plugin.py tests/test_export_flatquant_w4a4_vllm.py tests/test_exaone45_w4a4_logits.py -k 'not tiny_conditional'`
+
+Result: `29 passed, 1 deselected`.
+
+The `logits` and `ppl` commands are now executable adapters rather than
+stubs. Logits uses vLLM's supported full-vocabulary `logprobs=-1` output and
+the repository deploy-mode Transformers reference on identical token IDs;
+PPL uses vLLM `prompt_logprobs` over a supplied local WikiText-2 text file.
+Both query worker counters, reject zero dispatch/fallback, enforce explicitly
+supplied recorded gates, and write JSON through the common CLI path.
+
+The 33B checkpoints, WikiText-2 artifact, and recorded empirical tolerances
+remain absent. Therefore no 33B logits/PPL/fallback result is claimed.

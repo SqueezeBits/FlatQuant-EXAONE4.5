@@ -55,19 +55,24 @@ FLATQUANT_W4A4_STRICT=1 python benchmarks/exaone45/vllm_w4a4.py generate \
 
 FLATQUANT_W4A4_STRICT=1 python benchmarks/exaone45/vllm_w4a4.py logits \
   --model outputs/EXAONE-4.5-33B/w4a4-vllm \
-  --reference outputs/EXAONE-4.5-33B/w4a4-real
+  --reference outputs/EXAONE-4.5-33B/w4a4-real \
+  --layer-tolerance <recorded-layer-max> \
+  --logit-tolerance <recorded-logit-max> --min-token-agreement <recorded-min>
 
 FLATQUANT_W4A4_STRICT=1 python benchmarks/exaone45/vllm_w4a4.py ppl \
-  --model outputs/EXAONE-4.5-33B/w4a4-vllm --dataset wikitext2
+  --model outputs/EXAONE-4.5-33B/w4a4-vllm --dataset wikitext2 \
+  --dataset-path <local-wikitext-2-test.txt> \
+  --ppl-min <recorded-min> --ppl-max <recorded-max>
 ```
 
-The `logits` and `ppl` gates deliberately stop after validating their local
-artifact paths in this checkout: the real Transformers reference adapter,
-WikiText-2 tokenization artifacts, calibrated 33B checkpoints, and measured
-tolerances are not distributed here. This is an explicit incomplete gate, not
-a benchmark result. Do not publish zero fallback counts or numerical quality
-claims for those commands until those artifacts are supplied and the gates
-complete successfully.
+The `logits` gate runs the repository's deploy-mode Transformers FlatQuant
+adapter and vLLM with the same token IDs, compares full-vocabulary log
+probabilities (vLLM's supported offline equivalent to raw logits), and enforces
+the supplied recorded tolerances. The `ppl` gate
+uses vLLM prompt log probabilities over a local WikiText-2 text artifact and
+enforces the supplied recorded PPL interval. Neither command downloads data or
+invents tolerances: absent 33B checkpoints, dataset, or recorded values fail
+clearly, and no real-model result is claimed in this repository.
 
 ## Evaluation
 

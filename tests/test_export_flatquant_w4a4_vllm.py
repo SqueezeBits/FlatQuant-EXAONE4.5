@@ -67,7 +67,10 @@ def make_one_layer_source_checkpoint(path: Path) -> Path:
     (path / "model.safetensors.index.json").write_text(
         json.dumps({"weight_map": weight_map})
     )
-    (path / "config.json").write_text(json.dumps({"architectures": ["Exaone4ForCausalLM"]}))
+    (path / "config.json").write_text(json.dumps({
+        "architectures": ["Exaone4_5_ForConditionalGeneration"],
+        "model_type": "exaone4_5",
+    }))
     (path / "tokenizer_config.json").write_text("{}")
     return path
 
@@ -80,6 +83,7 @@ def test_export_fuses_rows_and_writes_native_manifest(tmp_path):
     manifest = json.loads((output / "flatquant_w4a4_config.json").read_text())
     validate_manifest(manifest)
     config = json.loads((output / "config.json").read_text())
+    assert config["architectures"] == ["Exaone4_5_ForConditionalGeneration"]
     assert config["quantization_config"] == manifest
     assert (output / "tokenizer_config.json").exists()
     with safe_open(output / "model-00001-of-00001.safetensors", framework="pt") as handle:

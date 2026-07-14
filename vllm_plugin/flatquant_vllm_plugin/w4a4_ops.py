@@ -24,6 +24,13 @@ class DispatchCounters:
         with self._lock:
             return dict(self._counts)
 
+    def reset(self) -> dict[str, int]:
+        """Clear counts and return the previous snapshot (RPC-friendly)."""
+        with self._lock:
+            previous = dict(self._counts)
+            self._counts.clear()
+            return previous
+
 
 dispatch_counters = DispatchCounters()
 

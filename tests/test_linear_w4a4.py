@@ -309,6 +309,72 @@ def test_linear_meta_rejection_parity(packed_x, packed_w, xscale, wscale, dtype,
         torch.ops.flatquant.w4a4_linear(packed_x, packed_w, xscale, wscale, dtype)
 
 
+@pytest.mark.parametrize(
+    "mutate,match",
+    [
+        (lambda values: values.__setitem__(0, values[0].t()), "contiguous"),
+        (lambda values: values.__setitem__(1, values[1].t()), "contiguous"),
+        (lambda values: values.__setitem__(2, values[2].to(torch.float16)), "FP32"),
+        (lambda values: values.__setitem__(2, torch.empty(3, 1, device="meta")), "x_scale"),
+        (lambda values: values.__setitem__(3, values[3].to(torch.float32)), "FP16"),
+        (lambda values: values.__setitem__(3, torch.empty(7, 1, device="meta", dtype=torch.float16)), "w_scale"),
+        (lambda values: values.__setitem__(5, torch.empty(8, device="meta", dtype=torch.float16)), "bias.*BF16"),
+        (lambda values: values.__setitem__(5, torch.empty(16, device="meta", dtype=torch.bfloat16)[::2]), "bias.*contiguous"),
+        (lambda values: values.__setitem__(5, torch.empty(7, device="meta", dtype=torch.bfloat16)), "bias.*shape"),
+    ],
+)
+def test_linear_fake_rejects_every_eager_cuda_contract_violation(mutate, match):
+    values = [
+        torch.empty(32, 2, device="meta", dtype=torch.uint8).t(),
+        torch.empty(32, 8, device="meta", dtype=torch.uint8).t(),
+        torch.empty(2, 1, device="meta", dtype=torch.float32),
+        torch.empty(8, 1, device="meta", dtype=torch.float16),
+        torch.bfloat16,
+        None,
+    ]
+    # Start contiguous; individual cases introduce one invalid property.
+    values[0] = values[0].contiguous()
+    values[1] = values[1].contiguous()
+    mutate(values)
+    with pytest.raises(RuntimeError, match=match):
+        torch.ops.flatquant.w4a4_linear(*values)
+
+
+@CUDA
+@pytest.mark.parametrize(
+    "case,match",
+    [
+        ("xscale_dtype", "FP32"), ("xscale_shape", "x_scale"),
+        ("wscale_dtype", "FP16"), ("wscale_shape", "w_scale"),
+        ("bias_dtype", "bias.*BF16"), ("bias_shape", "bias.*shape"),
+        ("bias_contiguous", "bias.*contiguous"), ("input_contiguous", "contiguous"),
+    ],
+)
+def test_fake_and_eager_cuda_reject_the_same_linear_contract(case, match):
+    def values(device):
+        result = [
+            torch.empty(2, 32, device=device, dtype=torch.uint8),
+            torch.empty(8, 32, device=device, dtype=torch.uint8),
+            torch.empty(2, 1, device=device, dtype=torch.float32),
+            torch.empty(8, 1, device=device, dtype=torch.float16),
+            torch.bfloat16,
+            None,
+        ]
+        if case == "xscale_dtype": result[2] = result[2].to(torch.float16)
+        if case == "xscale_shape": result[2] = torch.empty(3, 1, device=device)
+        if case == "wscale_dtype": result[3] = result[3].to(torch.float32)
+        if case == "wscale_shape": result[3] = torch.empty(7, 1, device=device, dtype=torch.float16)
+        if case == "bias_dtype": result[5] = torch.empty(8, device=device, dtype=torch.float16)
+        if case == "bias_shape": result[5] = torch.empty(7, device=device, dtype=torch.bfloat16)
+        if case == "bias_contiguous": result[5] = torch.empty(16, device=device, dtype=torch.bfloat16)[::2]
+        if case == "input_contiguous": result[0] = torch.empty(32, 2, device=device, dtype=torch.uint8).t()
+        return result
+
+    for device in ("meta", "cuda"):
+        with pytest.raises(RuntimeError, match=match):
+            torch.ops.flatquant.w4a4_linear(*values(device))
+
+
 @CUDA
 def test_empty_rows_return_empty_without_launch():
     layer = LinearW4A4(64, 8).cuda()

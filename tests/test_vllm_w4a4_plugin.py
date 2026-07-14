@@ -14,6 +14,7 @@ from flatquant_vllm_plugin.w4a4_ops import (
     DispatchCounters,
     apply_w4a4,
     dispatch_counters,
+    selected_w4a4_projections,
 )
 
 
@@ -53,14 +54,26 @@ def test_config_contract(config):
 
 
 def test_only_exaone_text_projections_are_wrapped(config):
+    selected_w4a4_projections.reset()
     method = config.get_quant_method(
         FakeLinear(), "language_model.model.layers.0.self_attn.qkv_proj"
     )
     assert isinstance(method, FlatQuantW4A4LinearMethod)
+    assert selected_w4a4_projections.snapshot() == (
+        "language_model.model.layers.0.self_attn.qkv_proj",
+    )
     assert isinstance(
         config.get_quant_method(FakeLinear(), "visual.blocks.0.mlp.down_proj"),
         UnquantizedLinearMethod,
     )
+
+
+def test_selection_accounting_deduplicates_projection_prefixes(config):
+    selected_w4a4_projections.reset()
+    prefix = "language_model.model.layers.0.mlp.down_proj"
+    config.get_quant_method(FakeLinear(), prefix)
+    config.get_quant_method(FakeLinear(), prefix)
+    assert selected_w4a4_projections.snapshot() == (prefix,)
 
 
 def test_tp_two_is_rejected(monkeypatch, config):

@@ -219,19 +219,26 @@ def test_tiny_conditional_checkpoint_cuda_graph_replays_changed_values_with_stab
     pytest.importorskip("vllm")
     model = _make_tiny_conditional_checkpoint(tmp_path)
 
-    report = run_cuda_graph_probe(model, prompt_pairs=[([1, 3], [1, 4])])
+    report = run_cuda_graph_probe(
+        model,
+        replay_cases=[
+            {"first": [1, 3], "second": [1, 4], "output_length": 1},
+            {"first": [1, 3, 4], "second": [1, 4, 3], "output_length": 2},
+        ],
+    )
 
     assert report["verified_fixture"] == "tiny_conditional_w4a4"
     assert report["enforce_eager"] is False
     assert report["same_shape_changed_values"] is True
     assert report["allocated_memory_stable"] is True
-    assert report["fallback_counts"]["w4a4"] > 0
-    assert report["fallback_counts"]["w4a16_fallback"] == 0
-    assert report["fallback_counts"]["bf16_fallback"] == 0
+    assert len(report["replays"]) == 2
+    assert all(item["outputs_respond"] for item in report["replays"])
+    assert all(item["allocated_memory_stable"] for item in report["replays"])
+    assert report["selection_evidence"]["w4a4_projection_count"] == 4
+    assert len(report["selection_evidence"]["w4a4_projection_prefixes"]) == 4
     assert set(report["meta_kernels"]) == {
         "flatquant::quantize_pack_i4",
         "flatquant::w4a4_linear",
         "flatquant::kron_transform",
         "flatquant::left_transform",
-        "flatquant::record_w4a4_dispatch",
     }

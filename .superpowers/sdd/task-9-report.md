@@ -18,14 +18,14 @@ runner, but did not run or fabricate the BF16/W4A16/W4A4 matrix because no real
 - Allocated CUDA memory was identical before and after measured replay.
 - The W4A4 C++ ops now use symbolic Python fake implementations; transform and
   dispatch marker custom ops also expose fake/Meta implementations.
-- Capture-time W4A4 selection was nonzero and fallback counters were zero.
-  CUDA Graph replay bypasses Python, so these counters prove the selected
-  backend was captured; they are not replay-call cardinality.
+- Model construction selected exactly four unique fused W4A4 prefixes. This is
+  backend-selection evidence, not replay-call cardinality.
 
 ## Capture issues found and fixed
 
 1. A Python lock in `DispatchCounters.increment` was inside Dynamo fullgraph.
-   Dispatch accounting is now an opaque graph-safe custom op.
+   Graph mode no longer performs invocation accounting. A unique-prefix
+   registry records truthful W4A4 selections during model construction.
 2. C++ Meta implementations specialized vLLM's dynamic M dimension. They were
    replaced with shared Python `register_fake` functions that retain symbolic
    shapes and preserve the former validation/rejection contract.
@@ -41,7 +41,10 @@ runner, but did not run or fabricate the BF16/W4A16/W4A4 matrix because no real
 and the W4A4 manifest before engine initialization or output creation. For each
 controlled backend/length/concurrency row it records prompt tokens/s, aggregate
 requests/s, TTFT median and p95, peak allocated GPU memory, completed requests,
-errors, and dispatch counters, then emits JSON and Markdown.
+structured errors, and selection evidence, then emits JSON and Markdown. Every
+backend/shape row runs in a fresh subprocess. Any failed/incomplete row or
+missing/invalid W4A4 selection evidence makes the overall status `failed` and
+the exit nonzero while preserving diagnostic JSON.
 
 Observed missing-artifact behavior:
 
@@ -56,13 +59,13 @@ no_result_written=true
 Focused CUDA Graph test:
 
 ```text
-1 passed, 9 deselected, 18 warnings in 26.03s
+1 passed, 9 deselected, 18 warnings in 34.78s
 ```
 
 Available regression suite:
 
 ```text
-106 passed, 18 warnings in 28.62s
+126 passed, 18 warnings in 28.53s
 ```
 
 The brief named `tests/test_w4a4_transform_quant.py`, but that file does not
@@ -90,3 +93,21 @@ FHT build exposed on `PYTHONPATH`.
 - Checked documentation includes the exact future matrix and serving commands.
 - Checked the diff for unrelated changes; generated build products and existing
   untracked review/progress files are not included in the commit.
+
+## Review fixes
+
+- Removed the false-mutation dispatch marker custom op.
+- Added full fake/eager CUDA validation parity for contiguity, scale dtype and
+  shape, and optional bias dtype/shape/contiguity.
+- Strengthened graph replay to prompt lengths 2 and 3, decode lengths 1 and 2,
+  and four alternating replays per case with per-replay allocator checks.
+- Isolated every throughput row in a fresh process with JSON IPC and structured
+  initialization, warm-up, measurement, and worker-exit failures.
+- Changed the documented BF16 argument to an explicitly local model path.
+
+Review verification of diagnostic CLI behavior:
+
+```text
+missing artifact: exit=2, no_result_written=true
+failed worker rows: exit=3, status=failed, rows=3, all errors structured
+```

@@ -8,12 +8,13 @@ checkpoint was exported to the real packed W4A4 format and loaded by vLLM
 
 The graph test used `enforce_eager=False`. vLLM compiled its dynamic `(1,
 8192)` token range, captured 51 mixed prefill/decode piecewise graphs and 35
-full decode graphs, then replayed equal-shape prompts with changed token
-values. Outputs changed and `torch.cuda.memory_allocated()` remained identical
-after warm-up. The W4A4 quantize, GEMM, transform, and dispatch marker operators
-all had Python fake/Meta implementations. Capture-time dispatch selection was
-W4A4 with zero fallback. Graph replay bypasses Python, so dispatch counters are
-capture-selection evidence, not a count of replayed kernel calls.
+full decode graphs, then exercised prompt lengths 2 and 3 with decode lengths 1
+and 2. Each case replayed alternating equal-shape prompts four times. Changed
+values changed logits, repeated values reproduced logits, and
+`torch.cuda.memory_allocated()` stayed at the post-warm-up baseline after every
+replay. The W4A4 quantize, GEMM, and transform operators all had symbolic fake/
+Meta implementations. Model construction selected exactly four unique fused
+W4A4 projection prefixes. This is selection evidence, not a replay call count.
 
 Reproduction in this instance:
 
@@ -37,7 +38,7 @@ When all real artifacts exist, run:
 
 ```bash
 FLATQUANT_W4A4_STRICT=1 python benchmarks/exaone45/w4a4_throughput_matrix.py \
-  --bf16-model LGAI-EXAONE/EXAONE-4.5-33B \
+  --bf16-model /local/models/EXAONE-4.5-33B-bf16 \
   --w4a16-model outputs/EXAONE-4.5-33B/w4a16-vllm/exaone45-33b-w4a16-vllm \
   --w4a4-model outputs/EXAONE-4.5-33B/w4a4-vllm \
   --input-lengths 2048 8192 16384 \
@@ -46,8 +47,12 @@ FLATQUANT_W4A4_STRICT=1 python benchmarks/exaone45/w4a4_throughput_matrix.py \
   --json outputs/exaone45-w4a4-a100-throughput.json
 ```
 
-Each row records prompt tokens/s, aggregate requests/s, median and p95 TTFT,
-peak allocated GPU memory, completed requests, errors, and dispatch counters.
+Each backend/length/concurrency row runs in a fresh subprocess and records
+prompt tokens/s, aggregate requests/s, median and p95 TTFT, peak allocated GPU
+memory, completed requests, structured warm-up/measurement errors, and W4A4
+model-construction selection evidence. The command exits zero and labels the
+result `verified` only when every row completes all requested requests and all
+W4A4 rows have positive selection evidence with zero fallback fields.
 
 The final serving command, once the real artifact exists, is:
 

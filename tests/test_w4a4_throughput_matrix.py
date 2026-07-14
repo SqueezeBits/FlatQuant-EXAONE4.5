@@ -5,6 +5,7 @@ import pytest
 
 from benchmarks.exaone45.w4a4_throughput_matrix import (
     MatrixConfig,
+    assess_rows,
     render_markdown,
     validate_model_paths,
 )
@@ -33,7 +34,7 @@ def test_markdown_contains_metrics_counters_and_blocked_scope():
             "prompt_tokens_per_s": 10.0, "requests_per_s": 0.1,
             "ttft_median_s": 1.0, "ttft_p95_s": 1.2,
             "peak_gpu_memory_bytes": 123, "completed_requests": 1,
-            "errors": [], "dispatch_counters": {"w4a4": 4, "w4a16_fallback": 0, "bf16_fallback": 0},
+            "errors": [], "selection_evidence": {"w4a4_projection_count": 4, "w4a16_fallback": 0, "bf16_fallback": 0},
         }],
     }
     text = render_markdown(payload)
@@ -42,3 +43,25 @@ def test_markdown_contains_metrics_counters_and_blocked_scope():
     assert "w4a16_fallback" in text
     assert "real_33b_matrix" in text
     json.dumps(payload)
+
+
+def test_assess_rows_requires_completion_and_truthful_w4a4_selection():
+    rows = [
+        {"backend": "bf16", "concurrency": 2, "completed_requests": 2, "errors": []},
+        {"backend": "w4a16", "concurrency": 2, "completed_requests": 2, "errors": []},
+        {"backend": "w4a4", "concurrency": 2, "completed_requests": 2, "errors": [],
+         "selection_evidence": {"w4a4_projection_count": 4, "w4a16_fallback": 0, "bf16_fallback": 0}},
+    ]
+    assert assess_rows(rows, expected_rows=3) == (True, [])
+    rows[2]["selection_evidence"]["w4a4_projection_count"] = 0
+    ok, reasons = assess_rows(rows, expected_rows=3)
+    assert not ok
+    assert any("selection" in reason for reason in reasons)
+
+
+def test_assess_rows_rejects_structured_warmup_or_measurement_failure():
+    row = {"backend": "bf16", "concurrency": 1, "completed_requests": 0,
+           "errors": [{"phase": "warmup", "type": "OutOfMemoryError", "message": "OOM"}]}
+    ok, reasons = assess_rows([row], expected_rows=1)
+    assert not ok
+    assert "warmup" in reasons[0]

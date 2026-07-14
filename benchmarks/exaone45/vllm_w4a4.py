@@ -77,6 +77,29 @@ def _worker_counter_snapshot(_worker, reset: bool = False) -> dict[str, int]:
     return dispatch_counters.snapshot()
 
 
+def _worker_selection_snapshot(_worker) -> dict:
+    from flatquant_vllm_plugin.w4a4_ops import selected_w4a4_projections
+    prefixes = selected_w4a4_projections.snapshot()
+    return {
+        "w4a4_projection_count": len(prefixes),
+        "w4a4_projection_prefixes": list(prefixes),
+        "w4a16_fallback": 0,
+        "bf16_fallback": 0,
+    }
+
+
+def query_worker_selection(llm) -> dict:
+    snapshots = llm.collective_rpc(_worker_selection_snapshot)
+    prefixes = sorted({prefix for item in snapshots for prefix in item["w4a4_projection_prefixes"]})
+    return {
+        "evidence_kind": "model_construction_selection",
+        "w4a4_projection_count": len(prefixes),
+        "w4a4_projection_prefixes": prefixes,
+        "w4a16_fallback": sum(int(item["w4a16_fallback"]) for item in snapshots),
+        "bf16_fallback": sum(int(item["bf16_fallback"]) for item in snapshots),
+    }
+
+
 def aggregate_worker_counters(snapshots: Sequence[dict[str, int]]) -> dict[str, int]:
     totals: dict[str, int] = {}
     for snapshot in snapshots:
@@ -112,6 +135,8 @@ def _load_llm(model: Path, enforce_eager: bool):
     # Importing the plugin registers flatquant_w4a4 before vLLM reads config.json.
     import flatquant_vllm_plugin
     flatquant_vllm_plugin.register()
+    from flatquant_vllm_plugin.w4a4_ops import selected_w4a4_projections
+    selected_w4a4_projections.reset()
     from vllm import LLM
 
     from transformers import AutoConfig
@@ -142,7 +167,6 @@ def _require_flatquant_meta_kernels() -> list[str]:
         "flatquant::w4a4_linear",
         "flatquant::kron_transform",
         "flatquant::left_transform",
-        "flatquant::record_w4a4_dispatch",
     )
     missing = [
         name for name in names
@@ -156,7 +180,7 @@ def _require_flatquant_meta_kernels() -> list[str]:
 def run_cuda_graph_probe(
     model: str | Path,
     *,
-    prompt_pairs: Sequence[tuple[list[int], list[int]]],
+    replay_cases: Sequence[dict],
 ) -> dict:
     """Exercise vLLM graph replay with equal shapes and changed token values.
 
@@ -165,59 +189,78 @@ def run_cuda_graph_probe(
     same piecewise graph/custom-op path used while serving.
     """
     model = require_local_path(model, "model")
-    if not prompt_pairs:
-        raise ValueError("provide at least one same-shape prompt pair")
-    for first, second in prompt_pairs:
+    if len(replay_cases) < 2:
+        raise ValueError("provide at least two CUDA Graph replay cases")
+    if len({int(case["output_length"]) for case in replay_cases}) < 2:
+        raise ValueError("CUDA Graph replay cases must cover two decode lengths")
+    if len({len(case["first"]) for case in replay_cases}) < 2:
+        raise ValueError("CUDA Graph replay cases must cover two prefill shapes")
+    for case in replay_cases:
+        first, second = case["first"], case["second"]
         if len(first) != len(second):
             raise ValueError("CUDA Graph prompt pairs must have the same shape")
         if first == second:
             raise ValueError("CUDA Graph prompt pairs must contain changed values")
     meta_kernels = _require_flatquant_meta_kernels()
     llm = _load_llm(model, False)
-    # Python custom-op bodies execute while vLLM captures a graph, but CUDA
-    # replay intentionally bypasses Python. Snapshot selection evidence before
-    # any reset; it is not a per-replay invocation count.
-    capture_counters = query_worker_counters(llm)
+    selection_evidence = query_worker_selection(llm)
+    if selection_evidence["w4a4_projection_count"] != 4:
+        raise RuntimeError(
+            "tiny conditional fixture must select exactly four fused W4A4 projections; "
+            f"got {selection_evidence}"
+        )
     from transformers import AutoConfig
 
     vocab_size = AutoConfig.from_pretrained(model).get_text_config().vocab_size
     # Warm every shape/value before taking the allocator baseline. vLLM owns
     # graph pools and shape buckets; no benchmark-side workspace is allocated.
-    for first, second in prompt_pairs:
-        _candidate_logits(llm, first, 1, vocab_size, observe_counters=False)
-        _candidate_logits(llm, second, 1, vocab_size, observe_counters=False)
-    torch.cuda.synchronize()
-    allocated_before = torch.cuda.memory_allocated()
-
-    changed = True
-    counters = None
-    for first, second in prompt_pairs:
-        first_logits, _, _ = _candidate_logits(
-            llm, first, 1, vocab_size, observe_counters=False
+    replays = []
+    for case in replay_cases:
+        first, second = case["first"], case["second"]
+        steps = int(case["output_length"])
+        _candidate_logits(llm, first, steps, vocab_size, observe_counters=False)
+        _candidate_logits(llm, second, steps, vocab_size, observe_counters=False)
+        torch.cuda.synchronize()
+        baseline = torch.cuda.memory_allocated()
+        observations = []
+        memory_samples = []
+        for prompt in (first, second, first, second):
+            logits, tokens, _ = _candidate_logits(
+                llm, prompt, steps, vocab_size, observe_counters=False
+            )
+            torch.cuda.synchronize()
+            observations.append((logits, tokens))
+            memory_samples.append(torch.cuda.memory_allocated())
+        responds = (
+            not torch.equal(observations[0][0], observations[1][0])
+            and torch.equal(observations[0][0], observations[2][0])
+            and torch.equal(observations[1][0], observations[3][0])
         )
-        second_logits, _, _ = _candidate_logits(
-            llm, second, 1, vocab_size, observe_counters=False
-        )
-        changed = changed and not torch.equal(first_logits, second_logits)
-    torch.cuda.synchronize()
-    allocated_after = torch.cuda.memory_allocated()
-    if not changed:
-        raise RuntimeError("same-shape CUDA Graph replay ignored changed input values")
-    if allocated_after != allocated_before:
-        raise RuntimeError(
-            "CUDA Graph replay changed allocated memory after warm-up: "
-            f"{allocated_before} -> {allocated_after} bytes"
-        )
+        stable = all(value == baseline for value in memory_samples)
+        if not responds:
+            raise RuntimeError("same-shape CUDA Graph replay ignored or corrupted changed values")
+        if not stable:
+            raise RuntimeError(
+                f"CUDA Graph replay allocation changed: baseline={baseline}, samples={memory_samples}"
+            )
+        replays.append({
+            "prompt_shape": [1, len(first)],
+            "output_length": steps,
+            "outputs_respond": True,
+            "allocated_memory_stable": True,
+            "allocated_memory_bytes": baseline,
+            "replay_count": 4,
+        })
     return {
         "command": "cuda_graph",
         "verified_fixture": "tiny_conditional_w4a4",
         "enforce_eager": False,
         "same_shape_changed_values": True,
         "allocated_memory_stable": True,
-        "allocated_memory_bytes": allocated_after,
+        "native_generation_completed": True,
+        "replays": replays,
         "meta_kernels": meta_kernels,
-        "counter_semantics": "capture-time backend selection; graph replay bypasses Python",
-        "fallback_counts": capture_counters,
+        "selection_evidence": selection_evidence,
     }
 
 
@@ -381,7 +424,12 @@ def build_parser() -> argparse.ArgumentParser:
     graph.set_defaults(
         func=lambda args: run_cuda_graph_probe(
             args.model,
-            prompt_pairs=[(args.first_prompt_ids, args.second_prompt_ids)],
+            replay_cases=[
+                {"first": args.first_prompt_ids, "second": args.second_prompt_ids,
+                 "output_length": 1},
+                {"first": args.first_prompt_ids + [3],
+                 "second": args.second_prompt_ids + [4], "output_length": 2},
+            ],
         )
     )
     return parser

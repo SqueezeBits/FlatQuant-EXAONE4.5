@@ -15,7 +15,7 @@ from vllm.model_executor.layers.quantization.base_config import QuantizationConf
 from vllm.model_executor.utils import set_weight_attrs
 
 from .transform import decompose_dim
-from .w4a4_ops import apply_w4a4
+from .w4a4_ops import apply_w4a4, selected_w4a4_projections
 
 
 @dataclass(frozen=True)
@@ -96,6 +96,7 @@ class FlatQuantW4A4LinearMethod(LinearMethodBase):
         self.prefix = prefix
         self.policy = policy
         self.representations = tuple(representations)
+        selected_w4a4_projections.add(prefix)
 
     def create_weights(
         self,

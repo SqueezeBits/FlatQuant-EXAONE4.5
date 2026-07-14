@@ -41,17 +41,27 @@ class DispatchCounters:
 dispatch_counters = DispatchCounters()
 
 
-# Keep Python observability outside Dynamo's traced bytecode. The marker has a
-# declared mutation solely to keep it live in the compiled graph; it does not
-# alter the activation and performs no CUDA allocation or synchronization.
-@torch.library.custom_op("flatquant::record_w4a4_dispatch", mutates_args={"x"})
-def _record_w4a4_dispatch(x: torch.Tensor) -> None:
-    dispatch_counters.increment("w4a4")
+class SelectedW4A4Projections:
+    """Unique model-construction selections, never replay invocation counts."""
+
+    def __init__(self):
+        self._prefixes = set()
+        self._lock = Lock()
+
+    def add(self, prefix: str) -> None:
+        with self._lock:
+            self._prefixes.add(prefix)
+
+    def snapshot(self) -> tuple[str, ...]:
+        with self._lock:
+            return tuple(sorted(self._prefixes))
+
+    def reset(self) -> None:
+        with self._lock:
+            self._prefixes.clear()
 
 
-@_record_w4a4_dispatch.register_fake
-def _(x) -> None:
-    return None
+selected_w4a4_projections = SelectedW4A4Projections()
 
 
 def apply_w4a4(layer, x, bias=None, *, prefix="<unknown>", policy=None,
@@ -83,5 +93,6 @@ def apply_w4a4(layer, x, bias=None, *, prefix="<unknown>", policy=None,
         packed_x, layer.weight, x_scale, layer.weight_scale, x.dtype
     )
     output = output.reshape(*leading_shape, output.shape[-1])
-    torch.ops.flatquant.record_w4a4_dispatch(output)
+    if not torch.compiler.is_compiling():
+        dispatch_counters.increment("w4a4")
     return output if bias is None else output + bias

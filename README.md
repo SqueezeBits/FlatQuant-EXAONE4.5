@@ -208,6 +208,9 @@ PPL in an 8 x 2,048-token smoke test (`6.911681770112198`) and byte-identical
 and `FLATQUANT_W4A4_STRICT=1` rejects a selected fallback with an error that
 identifies the layer prefix, `M`, and selection. Worker-observable counters have
 a stable schema: `w4a4`, `w4a16_fallback`, and `bf16_fallback`.
+Those counters describe eager invocations. Compiled/CUDA Graph validation uses
+the separately reported set of unique W4A4 projection prefixes selected during
+model construction; it does not mislabel graph replays as Python call counts.
 
 Current exports explicitly declare `representations: ["w4a4"]` and contain no
 duplicate W4A16 or BF16 projection weights. Consequently, setting a threshold

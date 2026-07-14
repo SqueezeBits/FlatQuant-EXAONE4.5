@@ -17,7 +17,9 @@ def unpack_signed_i4(packed: torch.Tensor) -> torch.Tensor:
     high = ((packed >> 4) & 0x0F).to(torch.int8)
     low = torch.where(low >= 8, low - 16, low)
     high = torch.where(high >= 8, high - 16, high)
-    output = torch.empty((packed.shape[0], packed.shape[1] * 2), dtype=torch.int8)
+    output = torch.empty(
+        (packed.shape[0], packed.shape[1] * 2), dtype=torch.int8, device=packed.device
+    )
     output[:, 0::2], output[:, 1::2] = low, high
     return output
 

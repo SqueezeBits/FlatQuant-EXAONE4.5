@@ -1,9 +1,8 @@
 import torch
+import deploy._CUDA
+
 from . import nn
 from . import functional
-
-
-import deploy._CUDA
 
 
 __all__ = [ 

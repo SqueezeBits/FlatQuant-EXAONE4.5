@@ -43,6 +43,12 @@ python tools/export_flatquant_w4a4_vllm.py \
 
 ### Strict W4A4 correctness gates
 
+CUDA Graph capture/replay and the controlled long-prompt matrix harness are
+documented in [docs/benchmarks/exaone45-w4a4-a100.md](docs/benchmarks/exaone45-w4a4-a100.md).
+The tiny conditional fixture verifies graph/kernel compatibility only. A real
+33B W4A4 artifact is required before the BF16/W4A16/W4A4 matrix writes results;
+the harness fails instead of substituting the tiny fixture.
+
 The correctness runner accepts local checkpoints only; it never downloads a
 model or substitutes another architecture. Strict mode makes unsupported
 shapes/backends fail instead of silently taking a fallback path:

@@ -13,6 +13,7 @@ from benchmarks.exaone45.vllm_w4a4 import (
     require_local_path,
     query_worker_counters,
     reset_worker_counters,
+    run_cuda_graph_probe,
 )
 from tools.export_flatquant_w4a4_vllm import export_checkpoint
 
@@ -206,3 +207,31 @@ def test_report_schema_is_json_serializable():
     result = compare_logits(torch.zeros(1), torch.ones(1), [1], [1], {"fallback": 0})
     payload = result.to_report(layer_tolerance=0.1, logit_tolerance=2.0)
     assert json.loads(json.dumps(payload))["fallback_counts"] == {"fallback": 0}
+
+
+def test_tiny_conditional_checkpoint_cuda_graph_replays_changed_values_with_stable_memory(
+    tmp_path, monkeypatch
+):
+    if not Path("/dev/nvidia0").exists():
+        pytest.skip("requires CUDA")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("FLATQUANT_W4A4_STRICT", "1")
+    pytest.importorskip("vllm")
+    model = _make_tiny_conditional_checkpoint(tmp_path)
+
+    report = run_cuda_graph_probe(model, prompt_pairs=[([1, 3], [1, 4])])
+
+    assert report["verified_fixture"] == "tiny_conditional_w4a4"
+    assert report["enforce_eager"] is False
+    assert report["same_shape_changed_values"] is True
+    assert report["allocated_memory_stable"] is True
+    assert report["fallback_counts"]["w4a4"] > 0
+    assert report["fallback_counts"]["w4a16_fallback"] == 0
+    assert report["fallback_counts"]["bf16_fallback"] == 0
+    assert set(report["meta_kernels"]) == {
+        "flatquant::quantize_pack_i4",
+        "flatquant::w4a4_linear",
+        "flatquant::kron_transform",
+        "flatquant::left_transform",
+        "flatquant::record_w4a4_dispatch",
+    }

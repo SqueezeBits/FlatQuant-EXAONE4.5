@@ -1,5 +1,7 @@
 import torch
 
+from deploy import w4a4_fake as _w4a4_fake  # noqa: F401
+
 
 def _require_sm80(device):
     if torch.device(device).type != "cuda":

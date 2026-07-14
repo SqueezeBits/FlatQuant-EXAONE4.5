@@ -130,6 +130,97 @@ def _load_llm(model: Path, enforce_eager: bool):
     )
 
 
+def _require_flatquant_meta_kernels() -> list[str]:
+    """Verify every CUDA op used by W4A4 has an abstract implementation."""
+    import deploy._CUDA  # noqa: F401  # Register C++ schemas before querying dispatch.
+    # Importing transform registers the two Python custom ops and fake kernels.
+    from flatquant_vllm_plugin import transform as _transform  # noqa: F401
+    from flatquant_vllm_plugin import w4a4_ops as _w4a4_ops  # noqa: F401
+
+    names = (
+        "flatquant::quantize_pack_i4",
+        "flatquant::w4a4_linear",
+        "flatquant::kron_transform",
+        "flatquant::left_transform",
+        "flatquant::record_w4a4_dispatch",
+    )
+    missing = [
+        name for name in names
+        if not torch._C._dispatch_has_kernel_for_dispatch_key(name, "Meta")
+    ]
+    if missing:
+        raise RuntimeError(f"W4A4 CUDA Graph capture requires Meta kernels: {missing}")
+    return list(names)
+
+
+def run_cuda_graph_probe(
+    model: str | Path,
+    *,
+    prompt_pairs: Sequence[tuple[list[int], list[int]]],
+) -> dict:
+    """Exercise vLLM graph replay with equal shapes and changed token values.
+
+    The probe deliberately uses the public vLLM engine rather than a raw
+    ``torch.cuda.CUDAGraph`` around one kernel.  Thus the evidence covers the
+    same piecewise graph/custom-op path used while serving.
+    """
+    model = require_local_path(model, "model")
+    if not prompt_pairs:
+        raise ValueError("provide at least one same-shape prompt pair")
+    for first, second in prompt_pairs:
+        if len(first) != len(second):
+            raise ValueError("CUDA Graph prompt pairs must have the same shape")
+        if first == second:
+            raise ValueError("CUDA Graph prompt pairs must contain changed values")
+    meta_kernels = _require_flatquant_meta_kernels()
+    llm = _load_llm(model, False)
+    # Python custom-op bodies execute while vLLM captures a graph, but CUDA
+    # replay intentionally bypasses Python. Snapshot selection evidence before
+    # any reset; it is not a per-replay invocation count.
+    capture_counters = query_worker_counters(llm)
+    from transformers import AutoConfig
+
+    vocab_size = AutoConfig.from_pretrained(model).get_text_config().vocab_size
+    # Warm every shape/value before taking the allocator baseline. vLLM owns
+    # graph pools and shape buckets; no benchmark-side workspace is allocated.
+    for first, second in prompt_pairs:
+        _candidate_logits(llm, first, 1, vocab_size, observe_counters=False)
+        _candidate_logits(llm, second, 1, vocab_size, observe_counters=False)
+    torch.cuda.synchronize()
+    allocated_before = torch.cuda.memory_allocated()
+
+    changed = True
+    counters = None
+    for first, second in prompt_pairs:
+        first_logits, _, _ = _candidate_logits(
+            llm, first, 1, vocab_size, observe_counters=False
+        )
+        second_logits, _, _ = _candidate_logits(
+            llm, second, 1, vocab_size, observe_counters=False
+        )
+        changed = changed and not torch.equal(first_logits, second_logits)
+    torch.cuda.synchronize()
+    allocated_after = torch.cuda.memory_allocated()
+    if not changed:
+        raise RuntimeError("same-shape CUDA Graph replay ignored changed input values")
+    if allocated_after != allocated_before:
+        raise RuntimeError(
+            "CUDA Graph replay changed allocated memory after warm-up: "
+            f"{allocated_before} -> {allocated_after} bytes"
+        )
+    return {
+        "command": "cuda_graph",
+        "verified_fixture": "tiny_conditional_w4a4",
+        "enforce_eager": False,
+        "same_shape_changed_values": True,
+        "allocated_memory_stable": True,
+        "allocated_memory_bytes": allocated_after,
+        "meta_kernels": meta_kernels,
+        "counter_semantics": "capture-time backend selection; graph replay bypasses Python",
+        "fallback_counts": capture_counters,
+    }
+
+
 def _dense_step_logits(step_logprobs, vocab_size: int) -> torch.Tensor:
     values = torch.full((vocab_size,), float("-inf"), dtype=torch.float32)
     for token_id, item in step_logprobs.items():
@@ -139,15 +230,19 @@ def _dense_step_logits(step_logprobs, vocab_size: int) -> torch.Tensor:
     return values
 
 
-def _candidate_logits(llm, prompt_ids: list[int], steps: int, vocab_size: int):
+def _candidate_logits(
+    llm, prompt_ids: list[int], steps: int, vocab_size: int, *, observe_counters=True
+):
     from vllm import SamplingParams
-    reset_worker_counters(llm)
+    if observe_counters:
+        reset_worker_counters(llm)
     result = llm.generate(
         [{"prompt_token_ids": prompt_ids}],
         SamplingParams(temperature=0, max_tokens=steps, ignore_eos=True, logprobs=-1),
     )[0].outputs[0]
     logits = torch.stack([_dense_step_logits(x, vocab_size) for x in result.logprobs])
-    return logits, list(result.token_ids), query_worker_counters(llm)
+    counters = query_worker_counters(llm) if observe_counters else None
+    return logits, list(result.token_ids), counters
 
 
 def _reference_logits(reference: Path, prompt_ids: list[int], steps: int):
@@ -278,6 +373,17 @@ def build_parser() -> argparse.ArgumentParser:
     ppl.add_argument("--ppl-max", type=float)
     ppl.add_argument("--report", type=Path, default=Path("w4a4-ppl.json"))
     ppl.set_defaults(func=run_ppl)
+    graph = sub.add_parser("cuda-graph")
+    graph.add_argument("--model", required=True)
+    graph.add_argument("--first-prompt-ids", type=int, nargs="+", default=[1, 3])
+    graph.add_argument("--second-prompt-ids", type=int, nargs="+", default=[1, 4])
+    graph.add_argument("--report", type=Path, default=Path("w4a4-cuda-graph.json"))
+    graph.set_defaults(
+        func=lambda args: run_cuda_graph_probe(
+            args.model,
+            prompt_pairs=[(args.first_prompt_ids, args.second_prompt_ids)],
+        )
+    )
     return parser
 
 

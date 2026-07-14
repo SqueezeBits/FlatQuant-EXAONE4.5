@@ -36,8 +36,7 @@ torch::Tensor w4a4_linear_meta(
               "x_scale shape mismatch");
   TORCH_CHECK(w_scale.dim() == 2 && w_scale.size(0) == packed_w.size(0) && w_scale.size(1) == 1,
               "w_scale shape mismatch");
-  TORCH_CHECK(output_dtype == torch::kBFloat16 || output_dtype == torch::kFloat16,
-              "output_dtype must be BF16 or FP16");
+  TORCH_CHECK(output_dtype == torch::kBFloat16, "output_dtype must be BF16");
   return torch::empty(
       {packed_x.size(0), packed_w.size(0)}, packed_x.options().dtype(output_dtype));
 }
@@ -47,11 +46,14 @@ torch::Tensor w4a4_linear_meta(
 TORCH_LIBRARY(flatquant, m) {
   m.def("quantize_pack_i4(Tensor x, Tensor clip) -> (Tensor, Tensor)");
   m.def("w4a4_linear(Tensor packed_x, Tensor packed_w, Tensor x_scale, Tensor w_scale, ScalarType output_dtype) -> Tensor");
+  m.def("w4a4_kernel_name(int M, int N, int K) -> str", &w4a4_kernel_name);
+  m.def("_w4a4_linear_candidate(Tensor packed_x, Tensor packed_w, Tensor x_scale, Tensor w_scale, ScalarType output_dtype, int candidate) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(flatquant, CUDA, m) {
   m.impl("quantize_pack_i4", &quantize_pack_i4_cuda);
   m.impl("w4a4_linear", &w4a4_linear_cuda);
+  m.impl("_w4a4_linear_candidate", &w4a4_linear_cuda_candidate);
 }
 
 TORCH_LIBRARY_IMPL(flatquant, Meta, m) {

@@ -1,6 +1,14 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
-#include <cutlass/gemm/device/gemm.h>
+#include <cutlass/cutlass.h>
+#include <cutlass/bfloat16.h>
+#include <cutlass/gemm/gemm.h>
+#include <cutlass/numeric_conversion.h>
+#include <cutlass/arch/memory.h>
+#include <cutlass/epilogue/threadblock/default_thread_map_tensor_op.h>
+#include <cutlass/epilogue/threadblock/fusion/visitors.hpp>
+#include <cutlass/gemm/device/gemm_universal_adapter.h>
+#include <cutlass/gemm/kernel/default_gemm_universal_with_visitor.h>
 #include <w4a4_gemm.h>
 
 namespace {
@@ -20,8 +28,6 @@ __global__ void quantize_pack_kernel(
       reduction[threadIdx.x] = fmaxf(reduction[threadIdx.x], reduction[threadIdx.x + stride]);
     __syncthreads();
   }
-  // Match PyTorch's elementwise CUDA division (multiply by the rounded
-  // reciprocal) so half-way rounding decisions agree with the reference.
   float scale = fmaxf(reduction[0] * __half2float(*clip), 1.0e-8f) * (1.0f / 7.0f);
   if (threadIdx.x == 0) scales[row] = scale;
   __syncthreads();
@@ -32,19 +38,6 @@ __global__ void quantize_pack_kernel(
   }
 }
 
-template <typename Output>
-__global__ void scale_output_kernel(
-    const int32_t* accum, const float* x_scale, const half* w_scale,
-    Output* output, int64_t rows, int64_t cols) {
-  int64_t index = blockIdx.x * blockDim.x + threadIdx.x;
-  if (index >= rows * cols) return;
-  int64_t row = index / cols;
-  int64_t col = index % cols;
-  float value = static_cast<float>(accum[index]);
-  value *= x_scale[row] * __half2float(w_scale[col]);
-  output[index] = static_cast<Output>(value);
-}
-
 void check_sm80() {
   cudaDeviceProp prop;
   int device;
@@ -52,6 +45,92 @@ void check_sm80() {
   C10_CUDA_CHECK(cudaGetDeviceProperties(&prop, device));
   TORCH_CHECK(prop.major == 8 && prop.minor == 0,
               "packed W4A4 currently supports NVIDIA SM80 only");
+}
+
+using ElementA = cutlass::int4b_t;
+using ElementB = cutlass::int4b_t;
+using ElementC = cutlass::bfloat16_t;
+using ElementAccumulator = int32_t;
+using ElementCompute = float;
+using InstructionShape = cutlass::gemm::GemmShape<16, 8, 64>;
+
+template <class ThreadblockShape, class WarpShape, int Stages>
+struct FusedGemm {
+  static constexpr int kEpilogueStages = 1;
+  using ThreadMap = cutlass::epilogue::threadblock::OutputTileThreadLayout<
+      ThreadblockShape, WarpShape, ElementC, 8, kEpilogueStages>;
+  using Accum = cutlass::epilogue::threadblock::VisitorAccFetch;
+  using XScale = cutlass::epilogue::threadblock::VisitorColBroadcast<
+      ThreadMap, float, cute::Stride<cute::_1, cute::_0, int64_t>, false>;
+  using WScale = cutlass::epilogue::threadblock::VisitorRowBroadcast<
+      ThreadMap, cutlass::half_t, cute::Stride<cute::_0, cute::_1, int64_t>, false>;
+  using Multiply = cutlass::epilogue::threadblock::VisitorCompute<
+      cutlass::multiplies, float, float, cutlass::FloatRoundStyle::round_to_nearest>;
+  using ScaleRows = cutlass::epilogue::threadblock::Sm80EVT<Multiply, Accum, XScale>;
+  using ScaleCols = cutlass::epilogue::threadblock::Sm80EVT<Multiply, ScaleRows, WScale>;
+  using Store = cutlass::epilogue::threadblock::VisitorAuxStore<
+      ThreadMap, ElementC, cutlass::FloatRoundStyle::round_to_nearest,
+      cute::Stride<int64_t, cute::_1, int64_t>>;
+  using Epilogue = cutlass::epilogue::threadblock::Sm80EVT<Store, ScaleCols>;
+  using Kernel = typename cutlass::gemm::kernel::DefaultGemmWithVisitor<
+      ElementA, cutlass::layout::RowMajor, cutlass::ComplexTransform::kNone, 32,
+      ElementB, cutlass::layout::ColumnMajor, cutlass::ComplexTransform::kNone, 32,
+      ElementC, cutlass::layout::RowMajor, 8, ElementAccumulator, ElementCompute,
+      cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80,
+      ThreadblockShape, WarpShape, InstructionShape, Epilogue,
+      cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>, Stages,
+      cutlass::arch::OpMultiplyAddSaturate, kEpilogueStages>::GemmKernel;
+  using Device = cutlass::gemm::device::GemmUniversalAdapter<Kernel>;
+};
+
+using KernelSmall = FusedGemm<cutlass::gemm::GemmShape<64, 128, 128>,
+                              cutlass::gemm::GemmShape<32, 64, 128>, 3>;
+using KernelMedium = FusedGemm<cutlass::gemm::GemmShape<128, 128, 128>,
+                               cutlass::gemm::GemmShape<64, 64, 128>, 3>;
+using KernelLarge = FusedGemm<cutlass::gemm::GemmShape<128, 256, 128>,
+                              cutlass::gemm::GemmShape<64, 64, 128>, 3>;
+
+int row_bucket(int64_t m) {
+  return m < 32 ? 0 : m < 128 ? 1 : m < 512 ? 2 : m < 2048 ? 3 : 4;
+}
+
+int candidate_for(int64_t m, int64_t n, int64_t k) {
+  int b = row_bucket(m);
+  if (n == 5120 && k == 5120) { static constexpr int t[] = {1, 0, 0, 0, 2}; return t[b]; }
+  if (n == 1024 && k == 5120) { static constexpr int t[] = {0, 1, 0, 1, 0}; return t[b]; }
+  if (n == 27392 && k == 5120) { static constexpr int t[] = {0, 1, 2, 2, 2}; return t[b]; }
+  if (n == 5120 && k == 27392) { static constexpr int t[] = {0, 0, 0, 2, 2}; return t[b]; }
+  return b < 2 ? 0 : b == 2 ? 1 : 2;
+}
+
+const char* kernel_name(int64_t m, int64_t n, int64_t k) {
+  static constexpr const char* names[] = {
+      "sm80_64x128x128_w32x64x128_s3",
+      "sm80_128x128x128_w64x64x128_s3",
+      "sm80_128x256x128_w64x64x128_s3"};
+  return names[candidate_for(m, n, k)];
+}
+
+template <class Config>
+cutlass::Status launch_fused(
+    int m, int n, int k, const torch::Tensor& packed_x,
+    const torch::Tensor& packed_w, const torch::Tensor& x_scale,
+    const torch::Tensor& w_scale, torch::Tensor& output) {
+  using EVT = typename Config::Epilogue;
+  typename EVT::Arguments epilogue{{{{},
+      {x_scale.data_ptr<float>(), 0.0f, {cute::_1{}, cute::_0{}, int64_t(m)}}, {}},
+      {reinterpret_cast<const cutlass::half_t*>(w_scale.data_ptr()), cutlass::half_t(0),
+       {cute::_0{}, cute::_1{}, int64_t(n)}}, {}},
+      {reinterpret_cast<ElementC*>(output.data_ptr()), {int64_t(n), cute::_1{}, int64_t(m) * n}}};
+  typename Config::Device::Arguments args(
+      cutlass::gemm::GemmUniversalMode::kGemm, {m, n, k}, 1, epilogue,
+      reinterpret_cast<ElementA*>(packed_x.data_ptr()),
+      reinterpret_cast<ElementB*>(packed_w.data_ptr()), nullptr, nullptr,
+      int64_t(m) * k, int64_t(n) * k, 0, 0, k, k, 0, 0);
+  typename Config::Device gemm;
+  auto status = gemm.can_implement(args);
+  if (status != cutlass::Status::kSuccess) return status;
+  return gemm(args, nullptr, at::cuda::getCurrentCUDAStream());
 }
 
 }  // namespace
@@ -78,20 +157,23 @@ std::tuple<torch::Tensor, torch::Tensor> quantize_pack_i4_cuda(
   return {packed, scales};
 }
 
-torch::Tensor w4a4_linear_cuda(
+std::string w4a4_kernel_name(int64_t m, int64_t n, int64_t k) {
+  TORCH_CHECK(m >= 0 && n > 0 && k > 0 && n % 8 == 0 && k % 64 == 0,
+              "W4A4 kernel selection requires M >= 0, N % 8 == 0, K % 64 == 0");
+  return kernel_name(m, n, k);
+}
+
+torch::Tensor w4a4_linear_cuda_candidate(
     const torch::Tensor& packed_x, const torch::Tensor& packed_w,
     const torch::Tensor& x_scale, const torch::Tensor& w_scale,
-    c10::ScalarType output_dtype) {
+    c10::ScalarType output_dtype, int64_t candidate) {
   TORCH_CHECK(packed_x.is_cuda() && packed_w.is_cuda() && x_scale.is_cuda() && w_scale.is_cuda(),
               "all W4A4 tensors must be CUDA tensors");
-  TORCH_CHECK(packed_x.get_device() == packed_w.get_device() &&
-              packed_x.get_device() == x_scale.get_device() &&
-              packed_x.get_device() == w_scale.get_device(),
-              "all W4A4 tensors must be on the same CUDA device");
+  TORCH_CHECK(packed_x.get_device() == packed_w.get_device() && packed_x.get_device() == x_scale.get_device() &&
+              packed_x.get_device() == w_scale.get_device(), "all W4A4 tensors must be on the same CUDA device");
   c10::cuda::CUDAGuard guard(packed_x.device());
   check_sm80();
-  TORCH_CHECK(packed_x.is_contiguous() && packed_w.is_contiguous() &&
-              x_scale.is_contiguous() && w_scale.is_contiguous(),
+  TORCH_CHECK(packed_x.is_contiguous() && packed_w.is_contiguous() && x_scale.is_contiguous() && w_scale.is_contiguous(),
               "all W4A4 tensors must be contiguous");
   TORCH_CHECK(packed_x.scalar_type() == torch::kUInt8 && packed_w.scalar_type() == torch::kUInt8,
               "packed tensors must be uint8");
@@ -103,35 +185,27 @@ torch::Tensor w4a4_linear_cuda(
               "W4A4 requires K % 64 == 0 and N % 8 == 0");
   TORCH_CHECK(x_scale.sizes() == torch::IntArrayRef({packed_x.size(0), 1}), "x_scale shape mismatch");
   TORCH_CHECK(w_scale.sizes() == torch::IntArrayRef({packed_w.size(0), 1}), "w_scale shape mismatch");
-  TORCH_CHECK(output_dtype == torch::kBFloat16 || output_dtype == torch::kFloat16,
-              "output_dtype must be BF16 or FP16");
+  TORCH_CHECK(output_dtype == torch::kBFloat16, "output_dtype must be BF16");
+  TORCH_CHECK(candidate >= -1 && candidate < 3, "candidate must be -1, 0, 1, or 2");
   int64_t m = packed_x.size(0), n = packed_w.size(0), k = packed_x.size(1) * 2;
-  if (m == 0) return torch::empty({m, n}, packed_x.options().dtype(output_dtype));
-  auto accum = torch::empty({m, n}, packed_x.options().dtype(torch::kInt32));
-  using Gemm = cutlass::gemm::device::Gemm<
-      cutlass::int4b_t, cutlass::layout::RowMajor,
-      cutlass::int4b_t, cutlass::layout::ColumnMajor,
-      int32_t, cutlass::layout::RowMajor, int32_t,
-      cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80>;
-  Gemm gemm;
-  typename Gemm::Arguments args(
-      {int(m), int(n), int(k)},
-      {reinterpret_cast<cutlass::int4b_t*>(packed_x.data_ptr()), int(k)},
-      {reinterpret_cast<cutlass::int4b_t*>(packed_w.data_ptr()), int(k)},
-      {accum.data_ptr<int32_t>(), int(n)}, {accum.data_ptr<int32_t>(), int(n)}, {1, 0});
-  TORCH_CHECK(gemm(args, nullptr, at::cuda::getCurrentCUDAStream()) == cutlass::Status::kSuccess,
-              "CUTLASS W4A4 GEMM failed");
-  auto output = torch::empty({m, n}, packed_x.options().dtype(output_dtype));
-  int blocks = (m * n + 255) / 256;
-  if (output_dtype == torch::kBFloat16)
-    scale_output_kernel<<<blocks, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
-        accum.data_ptr<int32_t>(), x_scale.data_ptr<float>(),
-        reinterpret_cast<const half*>(w_scale.data_ptr()),
-        reinterpret_cast<__nv_bfloat16*>(output.data_ptr()), m, n);
-  else
-    scale_output_kernel<<<blocks, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
-        accum.data_ptr<int32_t>(), x_scale.data_ptr<float>(),
-        reinterpret_cast<const half*>(w_scale.data_ptr()), reinterpret_cast<half*>(output.data_ptr()), m, n);
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  auto output = torch::empty({m, n}, packed_x.options().dtype(torch::kBFloat16));
+  if (m == 0) return output;
+  cutlass::Status status;
+  int selected = candidate < 0 ? candidate_for(m, n, k) : candidate;
+  switch (selected) {
+    case 0: case 1: status = launch_fused<KernelSmall>(m, n, k, packed_x, packed_w, x_scale, w_scale, output); break;
+    case 2: status = launch_fused<KernelMedium>(m, n, k, packed_x, packed_w, x_scale, w_scale, output); break;
+    default: status = launch_fused<KernelLarge>(m, n, k, packed_x, packed_w, x_scale, w_scale, output); break;
+  }
+  TORCH_CHECK(status == cutlass::Status::kSuccess,
+              "CUTLASS W4A4 fused GEMM failed: ", cutlassGetStatusString(status));
   return output;
+}
+
+torch::Tensor w4a4_linear_cuda(
+    const torch::Tensor& packed_x, const torch::Tensor& packed_w,
+    const torch::Tensor& x_scale, const torch::Tensor& w_scale,
+    c10::ScalarType output_dtype) {
+  return w4a4_linear_cuda_candidate(
+      packed_x, packed_w, x_scale, w_scale, output_dtype, -1);
 }

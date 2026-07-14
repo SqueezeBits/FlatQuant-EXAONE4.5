@@ -7,6 +7,17 @@ from deploy.nn import LinearW4A4, quantize_pack_i4, w4a4_linear
 
 CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 
+# LGAI-EXAONE/EXAONE-4.5-33B text_config: hidden_size=5120,
+# intermediate_size=27392, num_attention_heads=40,
+# num_key_value_heads=8, and therefore head_dim=128.  These are the four
+# distinct dense projection shapes (Q/O, K/V, gate/up, down).
+EXAONE_PROJECTION_SHAPES = (
+    (5120, 5120),
+    (1024, 5120),
+    (27392, 5120),
+    (5120, 27392),
+)
+
 
 @CUDA
 @pytest.mark.parametrize("rows", [1, 16, 128, 1024])
@@ -29,6 +40,70 @@ def test_w4a4_matches_integer_reference(rows):
 
     torch.testing.assert_close(actual.float(), expected, rtol=2e-2, atol=2e-1)
     assert layer.weight.numel() == n * k // 2
+
+
+@CUDA
+@pytest.mark.parametrize("n,k", EXAONE_PROJECTION_SHAPES)
+def test_w4a4_exaone_projection_epilogue(n, k):
+    torch.manual_seed(23)
+    rows = 1
+    qweight = torch.randint(-8, 8, (n, k), dtype=torch.int8)
+    packed_w = pack_signed_i4(qweight).cuda()
+    wscale = (torch.rand(n, 1, dtype=torch.float16) * 0.02).cuda()
+    x = torch.randn(rows, k, device="cuda", dtype=torch.bfloat16)
+    packed_x, xscale = quantize_pack_i4(
+        x, torch.ones(1, device="cuda", dtype=torch.float16)
+    )
+    actual = torch.ops.flatquant.w4a4_linear(
+        packed_x, packed_w, xscale, wscale, torch.bfloat16
+    )
+    qx = (x.float() / xscale).round().clamp(-8, 7).to(torch.int32)
+    expected = (qx.cpu() @ qweight.to(torch.int32).T).float().cuda()
+    expected *= xscale * wscale.T.float()
+    torch.testing.assert_close(actual.float(), expected, rtol=2e-2, atol=2e-1)
+
+
+@CUDA
+def test_w4a4_epilogue_does_not_allocate_int32_output_matrix():
+    # Peak allocated bytes are allocator-backed and include transient tensors,
+    # unlike post-call snapshots.  Warm first so module/kernel initialization is
+    # excluded.  A BF16 output is 2*M*N bytes; the old epilogue additionally
+    # allocated a 4*M*N-byte INT32 matrix.
+    m, n, k = 512, 5120, 5120
+    packed_x = torch.zeros(m, k // 2, device="cuda", dtype=torch.uint8)
+    packed_w = torch.zeros(n, k // 2, device="cuda", dtype=torch.uint8)
+    xscale = torch.ones(m, 1, device="cuda")
+    wscale = torch.ones(n, 1, device="cuda", dtype=torch.float16)
+    torch.ops.flatquant.w4a4_linear(
+        packed_x, packed_w, xscale, wscale, torch.bfloat16
+    )
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+    baseline = torch.cuda.memory_allocated()
+    output = torch.ops.flatquant.w4a4_linear(
+        packed_x, packed_w, xscale, wscale, torch.bfloat16
+    )
+    torch.cuda.synchronize()
+    peak_delta = torch.cuda.max_memory_allocated() - baseline
+    output_bytes = output.numel() * output.element_size()
+    assert output.dtype == torch.bfloat16
+    assert peak_delta < output_bytes + m * n * 2
+
+
+@CUDA
+def test_w4a4_candidate_selector_parity_and_rejection():
+    m, n, k = 16, 768, 512
+    px = torch.randint(0, 256, (m, k // 2), device="cuda", dtype=torch.uint8)
+    pw = torch.randint(0, 256, (n, k // 2), device="cuda", dtype=torch.uint8)
+    xs = torch.rand(m, 1, device="cuda")
+    ws = torch.rand(n, 1, device="cuda", dtype=torch.float16)
+    outputs = [torch.ops.flatquant._w4a4_linear_candidate(
+        px, pw, xs, ws, torch.bfloat16, candidate) for candidate in range(3)]
+    for output in outputs[1:]:
+        torch.testing.assert_close(output, outputs[0], rtol=0, atol=0)
+    with pytest.raises(RuntimeError, match="candidate"):
+        torch.ops.flatquant._w4a4_linear_candidate(
+            px, pw, xs, ws, torch.bfloat16, 3)
 
 
 @CUDA
@@ -178,6 +253,10 @@ def test_quantize_meta_rejection_parity(x, clip, match):
          torch.empty(8, 32, device="meta", dtype=torch.uint8),
          torch.empty(2, 1, device="meta"), torch.empty(8, 1, device="meta", dtype=torch.float16),
          torch.float32, "output_dtype"),
+        (torch.empty(2, 32, device="meta", dtype=torch.uint8),
+         torch.empty(8, 32, device="meta", dtype=torch.uint8),
+         torch.empty(2, 1, device="meta"), torch.empty(8, 1, device="meta", dtype=torch.float16),
+         torch.float16, "BF16"),
     ],
 )
 def test_linear_meta_rejection_parity(packed_x, packed_w, xscale, wscale, dtype, match):

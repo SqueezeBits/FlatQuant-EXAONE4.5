@@ -81,7 +81,9 @@ def _config_json_quant_method(model_path):
 
     config_path = Path(model_path) / "config.json"
     if not config_path.exists():
-        return None
+        from huggingface_hub import hf_hub_download
+
+        config_path = Path(hf_hub_download(repo_id=model_path, filename="config.json"))
     quant_config = common.load_json(config_path).get("quantization_config") or {}
     return common._quant_method_from_config(quant_config)
 
